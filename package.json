@@ -1,0 +1,17 @@
+{
+  "name": "fractionator",
+  "version": "0.1.0",
+  "description": "Component catalogue tool for SwiftUI, Jetpack Compose, and Nunjucks prototypes",
+  "main": "src/index.js",
+  "bin": {
+    "fractionator": "./bin/cli.js"
+  },
+  "scripts": {
+    "test": "node --test src/**/*.test.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "glob": "^11.0.0"
+  }
+}
