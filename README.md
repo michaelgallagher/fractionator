@@ -16,9 +16,10 @@ Point fractionator at one or more prototype projects and it will:
 
 - **Node.js** 18+
 - **Xcode** and an iOS Simulator runtime (for iOS screenshot capture)
-- macOS (screenshot capture uses `xcrun simctl`)
+- **Android SDK** and a running Android emulator (for Android screenshot capture)
+- macOS (iOS screenshot capture uses `xcrun simctl`)
 
-Screenshots are optional — pass `--no-screenshots` to skip the build/capture step entirely. Static analysis (component detection, usage scanning, variant grouping) works without Xcode.
+Screenshots are optional — pass `--no-screenshots` to skip the build/capture step entirely. Static analysis (component detection, usage scanning, variant grouping) works without Xcode or Android SDK.
 
 ## Install
 
@@ -103,6 +104,8 @@ A summary table for pasting into documentation or design decision records.
 
 ## How screenshot capture works
 
+### iOS (SwiftUI)
+
 When scanning an iOS prototype (without `--no-screenshots`), fractionator:
 
 1. Extracts `#Preview { ... }` block bodies from component source files
@@ -112,11 +115,25 @@ When scanning an iOS prototype (without `--no-screenshots`), fractionator:
 5. For each preview: launches the app with a specific argument, waits for it to settle, and captures a screenshot via `simctl io screenshot`
 6. Cleans up — removes the generated gallery file and restores the original app entry point
 
-Some previews are automatically skipped:
+Some iOS previews are automatically skipped:
 
 - **`@Previewable @State`** — this Swift macro expands to property declarations that can't be extracted into a separate file
 - **Private types** — previews referencing `private` or `fileprivate` types from the same file (inaccessible from the gallery)
 - **Bare `return` statements** — multi-statement preview bodies that can't be wrapped in the gallery's `AnyView()`
+
+### Android (Jetpack Compose)
+
+When scanning an Android prototype (without `--no-screenshots`), fractionator:
+
+1. Scans component files for public `@Preview @Composable` functions
+2. Generates a temporary `FractionatorGalleryActivity.kt` that imports and calls each preview function
+3. Registers the gallery activity in `AndroidManifest.xml`
+4. Builds the app via `./gradlew assembleDebug`
+5. Installs the APK on the running Android emulator via `adb`
+6. For each preview: launches the gallery activity with an intent extra identifying the preview, waits for it to render, and captures a screenshot via `adb exec-out screencap`
+7. Cleans up — removes the generated activity file and restores the original manifest
+
+Android screenshots skip `private` and `internal` preview functions (inaccessible from the gallery activity). Unlike iOS, there are no `@Previewable` limitations — Compose preview functions are standalone, so coverage is typically 90%+.
 
 The tool logs how many previews it found versus how many it captured. Use `--no-screenshots` to skip the entire process if you only need static analysis.
 
@@ -145,7 +162,7 @@ Components are `@Composable fun` declarations in files matching the component di
 - Skips self-references and `@Preview` function bodies
 - Identifies the enclosing composable at each call site
 
-Screenshot capture for Android is not yet implemented (requires an Android emulator).
+Screenshot capture requires a running Android emulator — start one from Android Studio or via `emulator -avd <name>` before running fractionator.
 
 ### Nunjucks (planned)
 
@@ -160,6 +177,7 @@ src/
   swift-component-scanner.js      SwiftUI struct detection + signature extraction
   swift-screenshot-capture.js     #Preview screenshot capture via simctl
   kotlin-component-scanner.js     Compose @Composable detection + signature extraction
+  kotlin-screenshot-capture.js    @Preview screenshot capture via adb + gallery activity
   usage-scanner.js                Call-site detection across source files (multi-language)
   variant-grouper.js              Group usages by parameter combinations
   build-report.js                 HTML / JSON / Markdown output

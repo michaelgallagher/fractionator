@@ -10,6 +10,7 @@ const { scanUsages } = require("./usage-scanner");
 const { groupVariants } = require("./variant-grouper");
 const { buildReport } = require("./build-report");
 const { captureComponentScreenshots } = require("./swift-screenshot-capture");
+const { captureAndroidScreenshots } = require("./kotlin-screenshot-capture");
 
 /**
  * Main entry point. Scans the provided prototype sources, builds the
@@ -152,12 +153,19 @@ async function generate(options) {
 
     const androidVariantMap = groupVariants(androidComponents, androidUsageMap);
 
-    // Android screenshot capture is not yet implemented — requires an
-    // Android emulator + adb. Static analysis still works.
+    // Capture screenshots of component previews
+    let androidScreenshotMap = new Map();
     if (!options.noScreenshots) {
-      console.log(
-        "   Screenshots not yet supported for Android (coming soon)",
-      );
+      try {
+        androidScreenshotMap = await captureAndroidScreenshots(
+          androidComponents,
+          sources.android,
+          outputDir,
+        );
+      } catch (err) {
+        console.warn(`   ⚠️  Screenshot capture failed: ${err.message}`);
+        console.warn("   Continuing without screenshots");
+      }
     } else {
       console.log("   Screenshots skipped (--no-screenshots)");
     }
@@ -166,6 +174,7 @@ async function generate(options) {
     const androidEntries = androidComponents.map((comp) => {
       const usages = androidUsageMap.get(comp.name) || [];
       const variants = androidVariantMap.get(comp.name) || [];
+      const screenshots = androidScreenshotMap.get(comp.name) || [];
 
       return {
         name: comp.name,
@@ -173,7 +182,7 @@ async function generate(options) {
         relativePath: comp.relativePath,
         signature: comp.signature,
         previews: comp.previews,
-        screenshots: [],
+        screenshots,
         overloads: comp.overloads || 1,
         usageCount: usages.length,
         usages: usages.map((u) => ({

@@ -50,7 +50,7 @@ Static analysis working end-to-end. Running against the NHS App Android prototyp
 - **Variant grouping** — correctly parses both Kotlin `name = value` and Swift `name: value` named-argument syntax
 - **Combined report** — iOS and Android components appear together in the same HTML/JSON output, distinguished by platform badges
 
-Screenshot capture is not yet implemented for Android (requires an Android emulator + adb). Static analysis and the combined cross-platform report work without it.
+Screenshot capture is now implemented for Android — generates a gallery activity, builds via Gradle, and captures via `adb screencap`.
 
 ### What we learned building Phase 1 and 2
 
@@ -80,6 +80,12 @@ Screenshot capture is not yet implemented for Android (requires an Android emula
 
 **Auto-detection from the current directory works.** The CLI now detects the project type from root-level markers (`.xcodeproj` → iOS, `build.gradle` → Android, `.njk` files → web), so users can run `fractionator` with no flags from inside a prototype.
 
+**Android screenshot capture is simpler than iOS.** Compose `@Preview` functions are zero-argument standalone composables, so we can call them by name from a generated gallery activity — no need to extract and re-wrap preview bodies like iOS. The gallery imports each public preview function and uses a `when` expression to select the right one based on an intent extra. This avoids the iOS issues with `@Previewable`, `AnyView()` wrapping, and `SceneBuilder` limitations.
+
+**Private preview functions are the main skip category on Android.** Of 82 preview annotations in DemoNHSApp2's component files, 8 are private (inaccessible from the gallery activity). Unlike iOS where ~50% of previews are skipped due to `@Previewable`, Android preview coverage is ~90%+.
+
+**applicationId can differ from the Kotlin package.** The `applicationId` in `build.gradle.kts` (`com.prototype.nhsappnotabs`) is used by adb for app launching and force-stop, while the Kotlin package (`com.prototype.nhsappnotab`) is used for class resolution. The gallery activity needs both: the applicationId for adb commands and the full class name (`package.ActivityName`) for intent component resolution.
+
 ## What counts as a "component"
 
 ### SwiftUI (iOS)
@@ -104,7 +110,7 @@ A `@Composable` function that lives in a design system module or components pack
 
 **Usage detection:** find `FooBar(` call sites in `.kt` files outside the component's own file. Extract arguments.
 
-**Screenshot capture (planned):** Compose `@Preview` functions are simpler than SwiftUI's — they're standalone `@Composable` functions. The gallery approach should be more straightforward: generate a test activity with a switch over preview IDs, capture via `adb shell screencap`. The `@Previewable` issue doesn't exist in Compose.
+**Screenshot capture:** Compose `@Preview` functions are standalone zero-argument `@Composable` functions — simpler than SwiftUI's `#Preview` blocks. The tool generates a `FractionatorGalleryActivity` that imports all public preview functions and switches on a preview ID passed via intent extra. It registers the activity in `AndroidManifest.xml`, builds via `./gradlew assembleDebug`, installs on the emulator via `adb`, and captures each preview via `adb exec-out screencap -p`. Private preview functions are skipped (inaccessible from the generated activity). The `@Previewable` issue doesn't exist in Compose — all non-private preview functions are capturable.
 
 ### Nunjucks (Web)
 
@@ -257,6 +263,7 @@ src/
   swift-component-scanner.js      Find View structs + extract signatures
   swift-screenshot-capture.js     Capture #Preview screenshots via simctl
   kotlin-component-scanner.js     Find @Composable funs + extract signatures + merge overloads
+  kotlin-screenshot-capture.js    Capture @Preview screenshots via adb + gallery activity
   usage-scanner.js                Find call sites across source files (language-agnostic with config)
   variant-grouper.js              Group call-site arguments into distinct variants (Swift + Kotlin syntax)
   build-report.js                 Generate HTML/JSON/MD output
@@ -283,7 +290,7 @@ No shared code with Quiver. The scanners are simpler than Quiver's parsers (no n
 7. ~~**Kotlin component scanner** — find `@Composable fun Foo(` in design system modules, extract parameter list. Handle function overloads by merging into single entries.~~
 8. ~~**Usage scanner for Kotlin** — generalised the existing scanner with a pluggable language config (comment stripping, enclosing-view detection, preview detection).~~
 9. ~~**Variant grouper dual syntax** — parse both `name: value` (Swift) and `name = value` (Kotlin) named-argument syntax.~~
-10. **Compose screenshot capture** — generate a test activity with preview switch, capture via `adb shell screencap`. (Deferred — requires Android emulator.)
+10. ~~**Compose screenshot capture** — generate a gallery activity importing all public @Preview functions, register in AndroidManifest.xml, build via Gradle, capture via `adb exec-out screencap -p`. Private preview functions are automatically skipped.~~
 
 ### Phase 3 — Cross-platform alignment
 
