@@ -133,9 +133,19 @@ Components are `struct` types conforming to `View` in files matching the compone
 - Skips self-references (the component's own file) and `#Preview` blocks
 - Identifies the enclosing view at each call site
 
-### Jetpack Compose (planned)
+### Jetpack Compose
 
-`@Composable fun` declarations in component packages, with parameter lists extracted directly from function signatures.
+Components are `@Composable fun` declarations in files matching the component directory glob (default: `**/components/**/*.kt`). The scanner:
+
+- Strips comments (line and block)
+- Finds `@Composable fun FooBar(...)` declarations, skipping `@Preview` and `private` functions
+- Extracts function parameters as the component signature, with types and default values
+- Merges function overloads (e.g. `BadgeIcon` with `ImageVector` and `Painter` variants) into a single entry
+- Scans all `.kt` files for `FooBar(` call sites
+- Skips self-references and `@Preview` function bodies
+- Identifies the enclosing composable at each call site
+
+Screenshot capture for Android is not yet implemented (requires an Android emulator).
 
 ### Nunjucks (planned)
 
@@ -144,12 +154,13 @@ Components are `struct` types conforming to `View` in files matching the compone
 ## Project structure
 
 ```
-bin/cli.js                        CLI entry point
+bin/cli.js                        CLI entry point + project auto-detection
 src/
   index.js                        Pipeline orchestrator
   swift-component-scanner.js      SwiftUI struct detection + signature extraction
   swift-screenshot-capture.js     #Preview screenshot capture via simctl
-  usage-scanner.js                Call-site detection across source files
+  kotlin-component-scanner.js     Compose @Composable detection + signature extraction
+  usage-scanner.js                Call-site detection across source files (multi-language)
   variant-grouper.js              Group usages by parameter combinations
   build-report.js                 HTML / JSON / Markdown output
 docs/

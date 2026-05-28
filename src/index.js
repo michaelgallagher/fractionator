@@ -1,5 +1,11 @@
 const path = require("path");
 const { scanSwiftComponents } = require("./swift-component-scanner");
+const {
+  scanKotlinComponents,
+  stripKotlinComments,
+  detectKotlinEnclosingView,
+  isInsideKotlinPreview,
+} = require("./kotlin-component-scanner");
 const { scanUsages } = require("./usage-scanner");
 const { groupVariants } = require("./variant-grouper");
 const { buildReport } = require("./build-report");
@@ -115,9 +121,101 @@ async function generate(options) {
     }
   }
 
-  // --- Android / Compose (Phase 2 — placeholder) ---
+  // --- Android / Compose ---
   if (sources.android) {
-    console.log(`\nAndroid support is not yet implemented (Phase 2)`);
+    console.log(`Scanning Android prototype: ${sources.android}`);
+
+    const { components: androidComponents, allKotlinFiles } =
+      scanKotlinComponents(sources.android, componentsDirOverride);
+    console.log(
+      `   Found ${androidComponents.length} components in ${allKotlinFiles.length} Kotlin files`,
+    );
+
+    const kotlinLangConfig = {
+      stripComments: stripKotlinComments,
+      detectEnclosingView: detectKotlinEnclosingView,
+      isInsidePreview: isInsideKotlinPreview,
+      fileExtension: ".kt",
+    };
+
+    const androidUsageMap = scanUsages(
+      androidComponents,
+      allKotlinFiles,
+      sources.android,
+      kotlinLangConfig,
+    );
+
+    let totalAndroidUsages = 0;
+    for (const usages of androidUsageMap.values())
+      totalAndroidUsages += usages.length;
+    console.log(`   Found ${totalAndroidUsages} total usages`);
+
+    const androidVariantMap = groupVariants(androidComponents, androidUsageMap);
+
+    // Android screenshot capture is not yet implemented — requires an
+    // Android emulator + adb. Static analysis still works.
+    if (!options.noScreenshots) {
+      console.log(
+        "   Screenshots not yet supported for Android (coming soon)",
+      );
+    } else {
+      console.log("   Screenshots skipped (--no-screenshots)");
+    }
+
+    // Assemble per-component catalogue entries
+    const androidEntries = androidComponents.map((comp) => {
+      const usages = androidUsageMap.get(comp.name) || [];
+      const variants = androidVariantMap.get(comp.name) || [];
+
+      return {
+        name: comp.name,
+        platform: "android",
+        relativePath: comp.relativePath,
+        signature: comp.signature,
+        previews: comp.previews,
+        screenshots: [],
+        overloads: comp.overloads || 1,
+        usageCount: usages.length,
+        usages: usages.map((u) => ({
+          relativePath: u.relativePath,
+          lineNumber: u.lineNumber,
+          enclosingView: u.enclosingView,
+          rawArgs: u.rawArgs,
+        })),
+        variants: variants.map((v) => ({
+          label: v.label,
+          count: v.count,
+          signatureKey: v.signatureKey,
+          usages: v.usages.map((u) => ({
+            relativePath: u.relativePath,
+            lineNumber: u.lineNumber,
+            enclosingView: u.enclosingView,
+          })),
+        })),
+      };
+    });
+
+    // Filter unused if not requested
+    const androidFiltered = includeUnused
+      ? androidEntries
+      : androidEntries.filter((e) => e.usageCount > 0);
+
+    catalogue.platforms.android = {
+      projectPath: sources.android,
+      componentCount: androidComponents.length,
+      usedCount: androidEntries.filter((e) => e.usageCount > 0).length,
+      unusedCount: androidEntries.filter((e) => e.usageCount === 0).length,
+      components: androidFiltered,
+    };
+
+    const unusedAndroid = androidEntries
+      .filter((e) => e.usageCount === 0)
+      .map((e) => e.name);
+    if (unusedAndroid.length > 0) {
+      console.log(
+        `   ${unusedAndroid.length} unused components${includeUnused ? " (included)" : " (excluded — use --include-unused to show)"}`,
+      );
+    }
   }
 
   // --- Web / Nunjucks (Phase 4 — placeholder) ---

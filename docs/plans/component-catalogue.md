@@ -40,7 +40,19 @@ Working end-to-end. Running against the NHS App iOS prototype (`nhsapp-ios-demo-
 - **HTML report** — filterable/sortable component cards with screenshot strips, signatures, usage locations, variant breakdown tables. Click-to-expand lightbox for screenshots. Dark mode support.
 - **JSON output** — full structured data for programmatic consumption
 
-### What we learned building Phase 1
+### Phase 2 — Android catalogue: ✅ complete
+
+Static analysis working end-to-end. Running against the NHS App Android prototype (`NHSAppNativeProto`) produces:
+
+- **3 components** detected in `nhsappdesignsystem/.../components/`
+- **3 total usages** across 21 Kotlin files
+- **Function overload handling** — `BadgeIcon` has 2 overloads (ImageVector and Painter variants), merged into one catalogue entry
+- **Variant grouping** — correctly parses both Kotlin `name = value` and Swift `name: value` named-argument syntax
+- **Combined report** — iOS and Android components appear together in the same HTML/JSON output, distinguished by platform badges
+
+Screenshot capture is not yet implemented for Android (requires an Android emulator + adb). Static analysis and the combined cross-platform report work without it.
+
+### What we learned building Phase 1 and 2
 
 **Component detection works well.** The regex-based `struct Foo: View` scanner with brace-depth tracking is reliable. Comment stripping (including nested `/* */` blocks) prevents false matches. Filtering to `**/Components/**/*.swift` (or a configurable glob) gives the right set.
 
@@ -57,6 +69,16 @@ Working end-to-end. Running against the NHS App iOS prototype (`nhsapp-ios-demo-
 3. **SceneBuilder limitations** — `@SceneBuilder` (used in `var body: some Scene`) doesn't support `if/else` control flow. The injection had to be moved inside the `WindowGroup` closure, which uses `@ViewBuilder` and does support conditionals. A private helper enum extracts the preview ID from launch arguments.
 
 **Preview coverage is partial but useful.** Of 37 components, 14 have compatible previews (25 screenshots total). The rest either lack `#Preview` blocks or use `@Previewable @State` bindings. This is an inherent limitation: `@Previewable` previews are designed for Xcode's live preview system and use compiler magic that can't be replicated by extracting the body into a separate file. Still, 50%+ coverage with zero manual work is valuable.
+
+**Kotlin component scanning translated cleanly from the Swift approach.** `@Composable fun Foo(...)` is as unambiguous as `struct Foo: View`. The main differences are parameter extraction (function params vs. stored properties) and comment stripping (Kotlin doesn't have nested block comments). The same usage scanner works for both languages with a pluggable language config (comment stripper, enclosing-view detector, preview-block detector).
+
+**Function overloads need merging.** Compose allows multiple `@Composable fun BadgeIcon(...)` declarations with different parameter types (e.g. `ImageVector` vs `Painter`). The scanner detects all overloads and merges them into a single catalogue entry, keeping the first overload's signature as primary and recording the overload count.
+
+**Variant grouper needed dual syntax support.** Swift uses `name: value` for named arguments; Kotlin uses `name = value`. The variant grouper now tries both patterns when parsing call-site arguments, which means it works correctly for both platforms without a language flag.
+
+**The usage scanner generalises well.** By parameterising the four language-specific functions (comment stripping, enclosing-view detection, preview detection, file extension), the same scanner handles both Swift and Kotlin. The core logic (build a regex from component names, scan files, extract arguments) is language-agnostic.
+
+**Auto-detection from the current directory works.** The CLI now detects the project type from root-level markers (`.xcodeproj` → iOS, `build.gradle` → Android, `.njk` files → web), so users can run `fractionator` with no flags from inside a prototype.
 
 ## What counts as a "component"
 
@@ -229,15 +251,15 @@ fractionator \
 ## Architecture
 
 ```
-bin/cli.js                        CLI entry point (Commander)
+bin/cli.js                        CLI entry point (Commander) + project auto-detection
 src/
-  index.js                        Pipeline orchestrator
+  index.js                        Pipeline orchestrator (iOS + Android)
   swift-component-scanner.js      Find View structs + extract signatures
   swift-screenshot-capture.js     Capture #Preview screenshots via simctl
-  usage-scanner.js                Find call sites across all source files
-  variant-grouper.js              Group call-site arguments into distinct variants
+  kotlin-component-scanner.js     Find @Composable funs + extract signatures + merge overloads
+  usage-scanner.js                Find call sites across source files (language-agnostic with config)
+  variant-grouper.js              Group call-site arguments into distinct variants (Swift + Kotlin syntax)
   build-report.js                 Generate HTML/JSON/MD output
-  kotlin-component-scanner.js     [Phase 2] Find @Composable funs + signatures
   nunjucks-component-scanner.js   [Phase 4] Find macro definitions + param keys
   cross-platform-matcher.js       [Phase 3] Auto-match + apply mapping file
   mapping-generator.js            [Phase 3] Generate starter component-mapping.yaml
@@ -256,11 +278,12 @@ No shared code with Quiver. The scanners are simpler than Quiver's parsers (no n
 5. ~~**HTML report** — component cards with screenshots, signatures, usage locations, variant breakdown.~~
 6. ~~**JSON output** — full catalogue data.~~
 
-### Phase 2 — Android support
+### Phase 2 — Android support ✅
 
-7. **Kotlin component scanner** — find `@Composable fun Foo(` in design system modules, extract parameter list.
-8. **Usage scanner for Kotlin** — same pattern as iOS but for `.kt` files.
-9. **Compose screenshot capture** — generate a test activity with preview switch, capture via `adb shell screencap`.
+7. ~~**Kotlin component scanner** — find `@Composable fun Foo(` in design system modules, extract parameter list. Handle function overloads by merging into single entries.~~
+8. ~~**Usage scanner for Kotlin** — generalised the existing scanner with a pluggable language config (comment stripping, enclosing-view detection, preview detection).~~
+9. ~~**Variant grouper dual syntax** — parse both `name: value` (Swift) and `name = value` (Kotlin) named-argument syntax.~~
+10. **Compose screenshot capture** — generate a test activity with preview switch, capture via `adb shell screencap`. (Deferred — requires Android emulator.)
 
 ### Phase 3 — Cross-platform alignment
 

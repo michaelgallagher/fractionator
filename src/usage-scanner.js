@@ -12,11 +12,24 @@ const { stripSwiftComments, extractBraceBlock } = require("./swift-component-sca
  *   - raw argument text (best-effort extraction)
  *
  * @param {ComponentDef[]} components - From the component scanner
- * @param {string[]} allSourceFiles - All Swift files in the project
+ * @param {string[]} allSourceFiles - All source files in the project
  * @param {string} projectPath - Project root for relative paths
+ * @param {object} [langConfig] - Language-specific functions (defaults to Swift)
+ * @param {function} langConfig.stripComments - Comment stripping function
+ * @param {function} langConfig.detectEnclosingView - Find enclosing view/screen name
+ * @param {function} langConfig.isInsidePreview - Check if position is in a preview block
+ * @param {string} langConfig.fileExtension - File extension for fallback basename
  * @returns {Map<string, Usage[]>} - Component name → list of usages
  */
-function scanUsages(components, allSourceFiles, projectPath) {
+function scanUsages(components, allSourceFiles, projectPath, langConfig) {
+  const config = {
+    stripComments: stripSwiftComments,
+    detectEnclosingView: detectSwiftEnclosingView,
+    isInsidePreview: isInsideSwiftPreview,
+    fileExtension: ".swift",
+    ...langConfig,
+  };
+
   const usageMap = new Map();
   for (const comp of components) {
     usageMap.set(comp.name, []);
@@ -46,12 +59,11 @@ function scanUsages(components, allSourceFiles, projectPath) {
 
   for (const filePath of allSourceFiles) {
     const rawContent = fs.readFileSync(filePath, "utf-8");
-    const content = stripSwiftComments(rawContent);
-    const rawLines = rawContent.split("\n");
+    const content = config.stripComments(rawContent);
     const relativePath = path.relative(projectPath, filePath);
 
     // Determine which view/screen this file defines (if any)
-    const enclosingView = detectEnclosingView(content);
+    const enclosingView = config.detectEnclosingView(content);
 
     let match;
     callPattern.lastIndex = 0;
@@ -68,8 +80,8 @@ function scanUsages(components, allSourceFiles, projectPath) {
       // Skip usages in the component's own definition file
       if (defFiles.get(compName) === filePath) continue;
 
-      // Skip usages inside #Preview blocks
-      if (isInsidePreview(content, match.index)) continue;
+      // Skip usages inside preview blocks
+      if (config.isInsidePreview(content, match.index)) continue;
 
       // Find the line number in the raw source
       const lineNumber = lineNumberAt(content, match.index, rawContent);
@@ -83,7 +95,7 @@ function scanUsages(components, allSourceFiles, projectPath) {
           filePath,
           relativePath,
           lineNumber,
-          enclosingView: enclosingView || path.basename(filePath, ".swift"),
+          enclosingView: enclosingView || path.basename(filePath, config.fileExtension),
           rawArgs: args,
         });
       }
@@ -93,10 +105,14 @@ function scanUsages(components, allSourceFiles, projectPath) {
   return usageMap;
 }
 
+// ---------------------------------------------------------------------------
+// Swift-specific defaults (used when no langConfig is passed)
+// ---------------------------------------------------------------------------
+
 /**
  * Find the primary View struct defined in this file (the "screen" name).
  */
-function detectEnclosingView(content) {
+function detectSwiftEnclosingView(content) {
   const match = content.match(
     /\bstruct\s+(\w+)\s*(?:<[^>]*>)?\s*:\s*(?:[^{]*?\b)?View\b/,
   );
@@ -106,7 +122,7 @@ function detectEnclosingView(content) {
 /**
  * Check whether a position in the source is inside a #Preview or @Preview block.
  */
-function isInsidePreview(content, pos) {
+function isInsideSwiftPreview(content, pos) {
   // Search backwards from pos for the nearest #Preview or @Preview
   const before = content.slice(0, pos);
   const lastPreview = Math.max(
@@ -126,11 +142,14 @@ function isInsidePreview(content, pos) {
   return pos >= block.start && pos < block.end;
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 /**
  * Map a character offset in the stripped content to a line number in the
  * raw source. Since comment stripping can shift positions, we approximate
- * by counting newlines up to the offset in the stripped content, then
- * searching for the component name near that line in the raw source.
+ * by counting newlines up to the offset in the stripped content.
  */
 function lineNumberAt(strippedContent, offset, rawContent) {
   // Count newlines in stripped content up to offset

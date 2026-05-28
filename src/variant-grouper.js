@@ -83,8 +83,10 @@ function parseArgs(rawArgs, signature) {
     const trimmed = part.trim();
     if (!trimmed || trimmed === "{ ... }") continue;
 
-    // Named argument: `name: value`
-    const namedMatch = trimmed.match(/^(\w+)\s*:\s*(.+)$/s);
+    // Named argument: `name: value` (Swift) or `name = value` (Kotlin)
+    const namedMatch =
+      trimmed.match(/^(\w+)\s*:\s*(.+)$/s) ||
+      trimmed.match(/^(\w+)\s*=\s*(.+)$/s);
     if (namedMatch) {
       const paramName = namedMatch[1];
       let paramValue = namedMatch[2].trim();
