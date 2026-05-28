@@ -33,30 +33,40 @@ node bin/cli.js --ios /path/to/ios-prototype
 
 ## Usage
 
+Once you've run `link`, if you're already inside a prototype directory, you can just run:
+
+```bash
+fractionator
+```
+
+It auto-detects the project type (`.xcodeproj` → iOS, `build.gradle` → Android, `.njk` files → web) and runs from there.
+
+You can also point at a prototype from anywhere:
+
 ```bash
 # Scan an iOS prototype — full analysis with screenshots
 fractionator --ios ~/Repos/my-ios-prototype
 
 # Quick analysis without screenshots (no Xcode build, much faster)
-fractionator --ios ~/Repos/my-ios-prototype --no-screenshots
+fractionator --no-screenshots
 
 # Custom output location and formats
-fractionator --ios ~/Repos/my-ios-prototype --output ./my-catalogue --format html,json,md
+fractionator --output ./my-catalogue --format html,json,md
 
 # Include components that are defined but never used
-fractionator --ios ~/Repos/my-ios-prototype --include-unused
+fractionator --include-unused
 
 # Override the component directory pattern
-fractionator --ios ~/Repos/my-ios-prototype --components-dir "**/DesignSystem/**/*.swift"
+fractionator --components-dir "**/DesignSystem/**/*.swift"
 ```
 
 ### Options
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--ios <path>` | Path to an iOS/SwiftUI prototype | — |
-| `--android <path>` | Path to an Android/Compose prototype | — |
-| `--web <path>` | Path to a web/Nunjucks prototype | — |
+| `--ios <path>` | Path to an iOS/SwiftUI prototype | auto-detect from cwd |
+| `--android <path>` | Path to an Android/Compose prototype | auto-detect from cwd |
+| `--web <path>` | Path to a web/Nunjucks prototype | auto-detect from cwd |
 | `--output <dir>` | Output directory | `catalogue-output/` |
 | `--format <formats>` | Comma-separated output formats: `html`, `json`, `md` | `html,json` |
 | `--mapping <path>` | Path to a `component-mapping.yaml` for cross-platform alignment | — |
@@ -65,7 +75,7 @@ fractionator --ios ~/Repos/my-ios-prototype --components-dir "**/DesignSystem/**
 | `--include-unused` | Include components that are defined but never used | `false` |
 | `--no-screenshots` | Skip screenshot capture (static analysis only) | `false` |
 
-At least one source (`--ios`, `--android`, or `--web`) is required.
+If no `--ios`, `--android`, or `--web` flag is given, fractionator detects the project type from the current directory. When pointing at multiple prototypes explicitly, pass each flag.
 
 ## Output
 
