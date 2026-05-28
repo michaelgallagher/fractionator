@@ -47,9 +47,9 @@ program
     if (Object.keys(sources).length === 0) {
       const detected = detectProjectType(process.cwd());
       if (detected) {
-        sources[detected] = process.cwd();
+        sources[detected.platform] = detected.dir;
         console.log(
-          `Detected ${detected} project in current directory\n`,
+          `Detected ${detected.platform} project in ${detected.dir === process.cwd() ? "current directory" : path.relative(process.cwd(), detected.dir) + "/"}\n`,
         );
       } else {
         console.error(
@@ -79,10 +79,40 @@ program
   });
 
 /**
- * Detect the prototype platform from files in the given directory.
- * Returns "ios", "android", "web", or null.
+ * Detect the prototype platform and project root from files in the given
+ * directory. Returns { platform, dir } or null.
+ *
+ * Checks the directory itself first, then immediate subdirectories — repos
+ * often have the actual project nested one level down (e.g. a repo root
+ * containing `NHSAppNativeProto/build.gradle.kts`).
  */
 function detectProjectType(dir) {
+  const result = detectInDir(dir);
+  if (result) return result;
+
+  // Check immediate subdirectories
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    const subdir = path.join(dir, entry.name);
+    const sub = detectInDir(subdir);
+    if (sub) return sub;
+  }
+
+  return null;
+}
+
+/**
+ * Check a single directory for project-type markers.
+ * Returns { platform, dir } or null.
+ */
+function detectInDir(dir) {
   // iOS — .xcodeproj, .xcworkspace, or Package.swift
   const hasXcodeProj =
     globSync("*.xcodeproj", { cwd: dir }).length > 0 ||
@@ -90,7 +120,7 @@ function detectProjectType(dir) {
       (w) => !w.includes(".xcodeproj/"),
     ).length > 0;
   if (hasXcodeProj || fs.existsSync(path.join(dir, "Package.swift"))) {
-    return "ios";
+    return { platform: "ios", dir };
   }
 
   // Android — build.gradle / build.gradle.kts / settings.gradle
@@ -101,12 +131,12 @@ function detectProjectType(dir) {
     "settings.gradle.kts",
   ];
   if (gradleFiles.some((f) => fs.existsSync(path.join(dir, f)))) {
-    return "android";
+    return { platform: "android", dir };
   }
 
   // Web / Nunjucks — .njk files or nunjucks in package.json dependencies
   if (globSync("**/*.njk", { cwd: dir, maxDepth: 3 }).length > 0) {
-    return "web";
+    return { platform: "web", dir };
   }
   try {
     const pkg = JSON.parse(
@@ -117,7 +147,7 @@ function detectProjectType(dir) {
       ...pkg.devDependencies,
     };
     if (allDeps["nunjucks"] || allDeps["govuk-frontend"] || allDeps["nhsuk-frontend"]) {
-      return "web";
+      return { platform: "web", dir };
     }
   } catch {
     // no package.json or invalid — not a web project
