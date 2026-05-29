@@ -2,6 +2,7 @@ const { execSync, spawnSync } = require("child_process");
 const { globSync } = require("glob");
 const path = require("path");
 const fs = require("fs");
+const { MODES, screenshotFilename } = require("./variation-modes");
 
 // Sentinel comment so we can detect our own injections
 const SENTINEL = "// FRACTIONATOR_INJECTED";
@@ -28,6 +29,8 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  *   (recomposed) relaunch
  * @param {number} [options.coldStartMs=4000] - ms to wait before capture on the
  *   first launch, which is a cold start and shows the app splash screen
+ * @param {string[]} [options.modes=["baseline"]] - display-trait modes to
+ *   capture each preview under (see variation-modes.js)
  * @returns {Map<string, object[]>} componentName → [{ path, previewName, id }]
  */
 async function captureAndroidScreenshots(
@@ -37,6 +40,7 @@ async function captureAndroidScreenshots(
   options = {},
 ) {
   const { settleMs = 2000, coldStartMs = 4000 } = options;
+  const modes = options.modes && options.modes.length ? options.modes : ["baseline"];
   const screenshotsDir = path.join(outputDir, "screenshots");
   fs.mkdirSync(screenshotsDir, { recursive: true });
 
@@ -75,6 +79,10 @@ async function captureAndroidScreenshots(
 
   const screenshotMap = new Map();
   let captured = 0;
+
+  // Captured before applying any trait overrides, restored in the finally
+  // block so the emulator is left as we found it.
+  let originalTraits = null;
 
   try {
     // Write gallery activity
@@ -121,82 +129,102 @@ async function captureAndroidScreenshots(
     adb(emulator, ["install", "-r", apkPath]);
     console.log(`   APK installed (${applicationId})`);
 
-    // 7. Screenshot loop
+    // 7. Screenshot loop. Display-trait modes are the outer loop: each mode is
+    // applied once as a global override (no rebuild). Changing font scale or
+    // night mode triggers a configuration change that recreates the activity
+    // and can kill the process, so we force-stop and re-warm once per mode;
+    // each preview within a mode is then a warm recomposition. Baseline trait
+    // values are snapshotted first so the emulator can be restored afterwards.
+    originalTraits = readAndroidTraits(emulator);
+
+    const totalShots = previews.length * modes.length;
     console.log(
-      `   Capturing ${previews.length} previews (cold start ${coldStartMs}ms, then ${settleMs}ms settle)...`,
+      `   Capturing ${previews.length} previews × ${modes.length} mode${modes.length !== 1 ? "s" : ""} = ${totalShots} (cold start ${coldStartMs}ms, then ${settleMs}ms settle)...`,
     );
 
     const activityComponent = `${applicationId}/${namespace}.FractionatorGalleryActivity`;
 
-    // Warm up the process before capturing anything. The gallery activity is
-    // singleTop and handles onNewIntent, so a cold start (app boot + splash
-    // screen) only happens when the process isn't already running; every real
-    // preview is then a warm recomposition with no splash. Warming up on a
-    // throwaway id renders the lightweight "unknown preview" branch, so the
-    // splash clears quickly — even a heavy first component (e.g. a WebView,
-    // whose creation can otherwise hold the splash past a fixed delay) is then
-    // captured warm.
-    try {
-      adb(emulator, ["shell", "am", "force-stop", applicationId]);
-    } catch {
-      // non-fatal
-    }
-    await warmUp(emulator, activityComponent, coldStartMs);
+    for (const modeId of modes) {
+      const mode = MODES[modeId];
+      if (modes.length > 1) console.log(`   Mode: ${mode.label}`);
+      applyAndroidMode(emulator, mode.android);
 
-    for (const preview of previews) {
-      // Some previews (e.g. ones that open a Chrome Custom Tab or external
-      // browser) can send the gallery to the background and get the process
-      // killed. A subsequent launch would then be a cold start and capture the
-      // splash screen. Guard against it: if the process died, re-warm on the
-      // throwaway id first so the splash is absorbed off a trivial frame.
-      if (!isProcessAlive(emulator, applicationId)) {
-        await warmUp(emulator, activityComponent, coldStartMs);
-      }
-
-      // Launch gallery activity with preview ID (warm recomposition)
-      const launchResult = launchGallery(emulator, activityComponent, preview.id);
-
-      if (launchResult.status !== 0) {
-        console.warn(
-          `   ⚠️  Launch failed for ${preview.id}: ${launchResult.stderr}`,
-        );
-        continue;
-      }
-
-      // Wait for the warm recomposition to render, then capture.
-      await sleep(settleMs);
-
-      // Capture screenshot via adb
-      const filename = `${sanitize(preview.id)}.png`;
-      const destFile = path.join(screenshotsDir, filename);
-
+      // The trait change recreates the activity, so start from a clean process
+      // and warm up on a throwaway id to absorb the cold-start splash on a
+      // trivial frame (see warmUp).
       try {
-        const pngData = spawnSync(
-          "adb",
-          ["-s", emulator, "exec-out", "screencap", "-p"],
-          { timeout: 10_000, maxBuffer: 20 * 1024 * 1024 },
+        adb(emulator, ["shell", "am", "force-stop", applicationId]);
+      } catch {
+        // non-fatal
+      }
+      await warmUp(emulator, activityComponent, coldStartMs);
+
+      for (const preview of previews) {
+        // Some previews (e.g. ones that open a Chrome Custom Tab or external
+        // browser) can send the gallery to the background and get the process
+        // killed. A subsequent launch would then be a cold start and capture
+        // the splash screen. Guard against it: if the process died, re-warm on
+        // the throwaway id first so the splash is absorbed off a trivial frame.
+        if (!isProcessAlive(emulator, applicationId)) {
+          await warmUp(emulator, activityComponent, coldStartMs);
+        }
+
+        // Launch gallery activity with preview ID (warm recomposition)
+        const launchResult = launchGallery(
+          emulator,
+          activityComponent,
+          preview.id,
         );
 
-        if (pngData.status === 0 && pngData.stdout && pngData.stdout.length > 0) {
-          fs.writeFileSync(destFile, pngData.stdout);
-          const relPath = `screenshots/${filename}`;
-          const existing = screenshotMap.get(preview.componentName) || [];
-          existing.push({
-            path: relPath,
-            previewName: preview.previewName,
-            id: preview.id,
-          });
-          screenshotMap.set(preview.componentName, existing);
-          captured++;
-        } else {
-          console.warn(`   ⚠️  Screenshot failed for ${preview.id}`);
+        if (launchResult.status !== 0) {
+          console.warn(
+            `   ⚠️  Launch failed for ${preview.id} [${modeId}]: ${launchResult.stderr}`,
+          );
+          continue;
         }
-      } catch (err) {
-        console.warn(`   ⚠️  Screenshot error for ${preview.id}: ${err.message}`);
+
+        // Wait for the warm recomposition to render, then capture.
+        await sleep(settleMs);
+
+        // Capture screenshot via adb
+        const filename = screenshotFilename(sanitize(preview.id), modeId);
+        const destFile = path.join(screenshotsDir, filename);
+
+        try {
+          const pngData = spawnSync(
+            "adb",
+            ["-s", emulator, "exec-out", "screencap", "-p"],
+            { timeout: 10_000, maxBuffer: 20 * 1024 * 1024 },
+          );
+
+          if (
+            pngData.status === 0 &&
+            pngData.stdout &&
+            pngData.stdout.length > 0
+          ) {
+            fs.writeFileSync(destFile, pngData.stdout);
+            const existing = screenshotMap.get(preview.componentName) || [];
+            existing.push({
+              path: `screenshots/${filename}`,
+              previewName: preview.previewName,
+              id: preview.id,
+              mode: modeId,
+              modeLabel: mode.label,
+            });
+            screenshotMap.set(preview.componentName, existing);
+            captured++;
+          } else {
+            console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+          }
+        } catch (err) {
+          console.warn(
+            `   ⚠️  Screenshot error for ${preview.id} [${modeId}]: ${err.message}`,
+          );
+        }
       }
     }
 
-    console.log(`   Captured ${captured} of ${previews.length} previews`);
+    console.log(`   Captured ${captured} of ${totalShots} screenshots`);
 
     // 8. Uninstall
     try {
@@ -205,6 +233,10 @@ async function captureAndroidScreenshots(
       // non-fatal
     }
   } finally {
+    // Restore display traits to how we found them.
+    if (originalTraits) {
+      restoreAndroidTraits(emulator, originalTraits);
+    }
     // Restore everything
     if (fs.existsSync(galleryPath)) {
       fs.unlinkSync(galleryPath);
@@ -711,6 +743,105 @@ function findBuiltApk(appModule) {
   throw new Error(
     `No APK found in ${apkDir}. Check that the build succeeded.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Display-trait control
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the emulator's current night mode / font scale / high-contrast-text
+ * settings so they can be restored after capture. A missing setting reads back
+ * as "null" (preserved verbatim so restore can `delete` it rather than guess a
+ * default — the baseline isn't necessarily the device default).
+ */
+function readAndroidTraits(device) {
+  const nightOut = adbTry(device, ["shell", "cmd", "uimode", "night"]);
+  const nightMatch = (nightOut || "").match(/night\s*(?:mode)?\s*:?\s*(\w+)/i);
+  return {
+    night: nightMatch ? nightMatch[1].toLowerCase() : "no",
+    font_scale: (
+      adbTry(device, ["shell", "settings", "get", "system", "font_scale"]) || ""
+    ).trim(),
+    high_text_contrast: (
+      adbTry(device, [
+        "shell",
+        "settings",
+        "get",
+        "secure",
+        "high_text_contrast_enabled",
+      ]) || ""
+    ).trim(),
+  };
+}
+
+/**
+ * Apply a set of display traits via adb (night mode, font scale, high-contrast
+ * text). Tolerant of individual settings failing — warns and continues.
+ */
+function applyAndroidMode(device, traits) {
+  adbTry(device, ["shell", "cmd", "uimode", "night", traits.night]);
+  adbTry(device, [
+    "shell",
+    "settings",
+    "put",
+    "system",
+    "font_scale",
+    traits.font_scale,
+  ]);
+  adbTry(device, [
+    "shell",
+    "settings",
+    "put",
+    "secure",
+    "high_text_contrast_enabled",
+    traits.high_text_contrast,
+  ]);
+}
+
+/**
+ * Restore traits captured by readAndroidTraits. Settings that were unset
+ * ("null") are deleted rather than written, so the emulator returns to its
+ * original state instead of an assumed default.
+ */
+function restoreAndroidTraits(device, original) {
+  adbTry(device, ["shell", "cmd", "uimode", "night", original.night || "no"]);
+  restoreSetting(device, "system", "font_scale", original.font_scale);
+  restoreSetting(
+    device,
+    "secure",
+    "high_text_contrast_enabled",
+    original.high_text_contrast,
+  );
+}
+
+/**
+ * Put a setting back to its captured value, or delete it if it was unset.
+ */
+function restoreSetting(device, namespace, key, value) {
+  if (!value || value === "null") {
+    adbTry(device, ["shell", "settings", "delete", namespace, key]);
+  } else {
+    adbTry(device, ["shell", "settings", "put", namespace, key, value]);
+  }
+}
+
+/**
+ * Run an adb command, returning stdout on success or null on failure (warning
+ * rather than throwing). Used for best-effort trait reads/writes.
+ */
+function adbTry(device, args) {
+  const result = spawnSync("adb", ["-s", device, ...args], {
+    encoding: "utf-8",
+    timeout: 15_000,
+  });
+  if (result.status !== 0) {
+    console.warn(
+      `   ⚠️  adb ${args.join(" ")} failed: ${(result.stderr || "").trim()}`,
+    );
+    return null;
+  }
+  return result.stdout;
 }
 
 // ---------------------------------------------------------------------------

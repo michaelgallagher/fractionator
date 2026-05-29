@@ -67,6 +67,7 @@ async function generate(options) {
           components,
           sources.ios,
           outputDir,
+          { modes: options.variations },
         );
       } catch (err) {
         console.warn(`   ⚠️  Screenshot capture failed: ${err.message}`);
@@ -176,6 +177,7 @@ async function generate(options) {
           androidComponents,
           sources.android,
           outputDir,
+          { modes: options.variations },
         );
       } catch (err) {
         console.warn(`   ⚠️  Screenshot capture failed: ${err.message}`);

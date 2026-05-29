@@ -173,6 +173,58 @@ function renderAlignment(alignment, platformOrder) {
   </section>`;
 }
 
+/**
+ * Render the preview screenshots for a card.
+ *
+ * Without variations (every shot is the baseline mode) this renders a single
+ * flat strip, captioned by preview name when there's more than one — identical
+ * to the original layout. With variations, screenshots are grouped by preview
+ * and each group shows one figure per display mode, captioned by mode label.
+ */
+function renderScreenshots(screenshots) {
+  const hasVariations = screenshots.some((s) => s.mode && s.mode !== "baseline");
+
+  if (!hasVariations) {
+    const figures = screenshots
+      .map(
+        (s) => `<figure class="screenshot-figure">
+              <img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)}" class="screenshot-img" loading="lazy">
+              ${screenshots.length > 1 ? `<figcaption>${esc(s.previewName)}</figcaption>` : ""}
+            </figure>`,
+      )
+      .join("\n            ");
+    return `<div class="screenshot-strip">${figures}</div>`;
+  }
+
+  // Group by preview id, preserving first-seen order. Modes within a group are
+  // in capture order (baseline first).
+  const groups = new Map();
+  for (const s of screenshots) {
+    const key = s.id || s.previewName;
+    if (!groups.has(key)) {
+      groups.set(key, { previewName: s.previewName, shots: [] });
+    }
+    groups.get(key).shots.push(s);
+  }
+
+  return [...groups.values()]
+    .map((group) => {
+      const figures = group.shots
+        .map(
+          (s) => `<figure class="screenshot-figure">
+              <img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)} (${esc(s.modeLabel || s.mode)})" class="screenshot-img" loading="lazy">
+              <figcaption>${esc(s.modeLabel || s.mode)}</figcaption>
+            </figure>`,
+        )
+        .join("\n            ");
+      return `<div class="preview-group">
+          <h5>${esc(group.previewName)}</h5>
+          <div class="screenshot-strip">${figures}</div>
+        </div>`;
+    })
+    .join("\n        ");
+}
+
 function renderComponentCard(comp) {
   const screenList = [...new Set(comp.usages.map((u) => u.enclosingView))];
   const variantCount = comp.variants.length;
@@ -192,10 +244,7 @@ function renderComponentCard(comp) {
           screenshots.length > 0
             ? `<div class="card-section">
           <h4>Preview${screenshots.length > 1 ? "s" : ""}</h4>
-          <div class="screenshot-strip">${screenshots.map((s) => `<figure class="screenshot-figure">
-              <img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)}" class="screenshot-img" loading="lazy">
-              ${screenshots.length > 1 ? `<figcaption>${esc(s.previewName)}</figcaption>` : ""}
-            </figure>`).join("\n            ")}</div>
+          ${renderScreenshots(screenshots)}
         </div>`
             : ""
         }
@@ -371,6 +420,9 @@ select {
 
 .unused-note { color: var(--text-secondary); font-style: italic; font-size: 0.85rem; }
 
+.preview-group { margin-bottom: 1rem; }
+.preview-group:last-child { margin-bottom: 0; }
+.preview-group h5 { font-size: 0.8rem; margin: 0 0 0.4rem; color: var(--text-secondary); font-weight: 600; }
 .screenshot-strip { display: flex; gap: 0.75rem; overflow-x: auto; padding-bottom: 0.5rem; }
 .screenshot-figure { flex: 0 0 auto; text-align: center; }
 .screenshot-figure figcaption { font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; }

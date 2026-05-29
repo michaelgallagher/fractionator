@@ -74,12 +74,40 @@ fractionator --components-dir "**/DesignSystem/**/*.swift"
 | `--init-mapping` | Generate a starter mapping file from detected components and exit | — |
 | `--components-dir <glob>` | Override the component directory pattern | per-platform heuristic |
 | `--include-unused` | Include components that are defined but never used | `false` |
+| `--variations <list>` | Also capture each preview under display traits: `dark`, `type`, `contrast` (or `all`) | baseline only |
 | `--no-screenshots` | Skip screenshot capture (static analysis only) | `false` |
 | `--no-open` | Don't open the HTML report in a browser when finished | opens by default |
 
 If no `--ios`, `--android`, or `--web` flag is given, fractionator detects the project type from the current directory. When pointing at multiple prototypes explicitly, pass each flag.
 
 When the run finishes, fractionator opens the generated `index.html` in your default browser (using `open` on macOS, `xdg-open` on Linux, `start` on Windows). Pass `--no-open` to suppress this — useful in CI or scripted runs. The report is only opened when the `html` format is produced.
+
+### Display-trait variations
+
+By default each preview is captured once, in a baseline appearance. Pass `--variations` to also capture every preview under one or more accessibility/appearance display traits:
+
+```bash
+# Capture baseline + dark mode + large Dynamic Type + high contrast
+fractionator --variations dark,type,contrast
+
+# Shorthand for all three
+fractionator --variations all
+```
+
+| Mode | What it sets | iOS | Android |
+|------|--------------|-----|---------|
+| `dark` | Dark appearance | `simctl ui appearance dark` | `cmd uimode night yes` |
+| `type` | Largest Dynamic Type / font scale | `content_size accessibility-extra-extra-extra-large` | `font_scale 2.0` |
+| `contrast` | Increased contrast | `increase_contrast enabled` | `high_text_contrast_enabled 1` |
+
+Each mode pins **all** of these axes to fixed values, so a variation isolates a single axis against a known baseline regardless of the device's prior state. The traits are applied as global OS overrides — the app is built **once** and each mode is an outer loop over the same previews, so no rebuild happens between modes.
+
+The baseline shot keeps its original filename (`<id>.png`); other modes add a suffix (`<id>__dark.png`). In the HTML report, previews with variations are grouped by preview name with one image per mode.
+
+Two things to keep in mind:
+
+- **Cost is multiplicative** — `previews × modes` captures. With ~60 previews, `--variations all` is ~240 screenshots (build once, then a settle per shot). It's opt-in for that reason.
+- **Device state is captured and restored.** Fractionator snapshots the simulator/emulator's current appearance, type-size, and contrast settings before capture and restores them afterwards — it does not assume defaults. (Variations apply to iOS and Android only; there is no web rendering path.)
 
 ## Output
 
@@ -90,7 +118,7 @@ A single self-contained page (no server needed) with:
 - **Summary stats** — component count, total usages, unused count, single-use count
 - **Cross-platform alignment table** — shown when two or more platforms are scanned: which concepts are shared, which names drift between platforms, and which are platform-only (see below)
 - **Component cards** — one per component, each showing:
-  - Screenshots of rendered previews in a horizontal scrollable strip (click to expand)
+  - Screenshots of rendered previews in a horizontal scrollable strip (click to expand); with `--variations`, grouped by preview with one image per display mode
   - Platform badge, usage count, variant count
   - Source file path
   - Component signature with parameter names, types, annotations, and defaults

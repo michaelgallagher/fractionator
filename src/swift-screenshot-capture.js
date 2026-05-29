@@ -3,6 +3,7 @@ const { globSync } = require("glob");
 const path = require("path");
 const fs = require("fs");
 const { extractBraceBlock } = require("./swift-component-scanner");
+const { MODES, screenshotFilename } = require("./variation-modes");
 
 // Sentinel comment so we can detect our own injections
 const SENTINEL = "// FRACTIONATOR_INJECTED";
@@ -25,6 +26,8 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  * @param {string} outputDir - Where to write screenshots
  * @param {object} [options]
  * @param {number} [options.settleMs=1500] - ms to wait after launch
+ * @param {string[]} [options.modes=["baseline"]] - display-trait modes to
+ *   capture each preview under (see variation-modes.js)
  * @returns {Map<string, string[]>} componentName → [screenshot relative paths]
  */
 async function captureComponentScreenshots(
@@ -34,6 +37,7 @@ async function captureComponentScreenshots(
   options = {},
 ) {
   const { settleMs = 1500 } = options;
+  const modes = options.modes && options.modes.length ? options.modes : ["baseline"];
   const screenshotsDir = path.join(outputDir, "screenshots");
   fs.mkdirSync(screenshotsDir, { recursive: true });
 
@@ -63,6 +67,11 @@ async function captureComponentScreenshots(
   const screenshotMap = new Map();
   let captured = 0;
 
+  // Captured before applying any trait overrides, restored in the finally
+  // block so the simulator is left as we found it.
+  let simulatorUdid = null;
+  let originalTraits = null;
+
   try {
     // Write gallery file
     fs.writeFileSync(galleryPath, gallerySource, "utf-8");
@@ -84,6 +93,7 @@ async function captureComponentScreenshots(
     const scheme = getScheme(xcodeProject, projectFlag);
 
     const simulator = findOrBootSimulator();
+    simulatorUdid = simulator.udid;
     console.log(`   Simulator: ${simulator.name} (${simulator.udid})`);
 
     console.log("   Building app...");
@@ -142,70 +152,39 @@ async function captureComponentScreenshots(
       "0",
     ]);
 
-    // 6. Screenshot loop
+    // 6. Screenshot loop. Display-trait modes are the outer loop: each mode is
+    // applied once as a global override (no rebuild), then every preview is
+    // captured under it. Baseline trait values are snapshotted first so the
+    // simulator can be restored afterwards.
+    originalTraits = readIosTraits(simulator.udid);
+
+    const totalShots = previews.length * modes.length;
     console.log(
-      `   Capturing ${previews.length} previews (${settleMs}ms settle)...`,
+      `   Capturing ${previews.length} previews × ${modes.length} mode${modes.length !== 1 ? "s" : ""} = ${totalShots} (${settleMs}ms settle)...`,
     );
 
-    for (const preview of previews) {
-      // Terminate any running instance
-      spawnSync("xcrun", ["simctl", "terminate", simulator.udid, bundleId], {
-        encoding: "utf-8",
-      });
-
-      // Launch with gallery arg
-      const launchResult = spawnSync(
-        "xcrun",
-        [
-          "simctl",
-          "launch",
-          simulator.udid,
-          bundleId,
-          "-fractionatorPreview",
-          preview.id,
-        ],
-        { encoding: "utf-8", timeout: 15_000 },
-      );
-
-      if (launchResult.status !== 0) {
-        console.warn(
-          `   ⚠️  Launch failed for ${preview.id}: ${launchResult.stderr}`,
-        );
-        continue;
-      }
-
-      // Settle
+    for (const modeId of modes) {
+      const mode = MODES[modeId];
+      if (modes.length > 1) console.log(`   Mode: ${mode.label}`);
+      applyIosMode(simulator.udid, mode.ios);
+      // Let the trait change propagate before the per-preview launches.
       await sleep(settleMs);
 
-      // Capture
-      const filename = `${sanitize(preview.id)}.png`;
-      const destFile = path.join(screenshotsDir, filename);
-      const shotResult = spawnSync(
-        "xcrun",
-        ["simctl", "io", simulator.udid, "screenshot", destFile],
-        { encoding: "utf-8", timeout: 10_000 },
-      );
-
-      if (
-        shotResult.status === 0 &&
-        fs.existsSync(destFile) &&
-        fs.statSync(destFile).size > 0
-      ) {
-        const relPath = `screenshots/${filename}`;
-        const existing = screenshotMap.get(preview.componentName) || [];
-        existing.push({
-          path: relPath,
-          previewName: preview.previewName,
-          id: preview.id,
-        });
-        screenshotMap.set(preview.componentName, existing);
-        captured++;
-      } else {
-        console.warn(`   ⚠️  Screenshot failed for ${preview.id}`);
+      for (const preview of previews) {
+        const ok = await captureOneIosPreview(
+          simulator.udid,
+          bundleId,
+          preview,
+          modeId,
+          screenshotsDir,
+          screenshotMap,
+          settleMs,
+        );
+        if (ok) captured++;
       }
     }
 
-    console.log(`   Captured ${captured} of ${previews.length} previews`);
+    console.log(`   Captured ${captured} of ${totalShots} screenshots`);
 
     // 7. Uninstall
     try {
@@ -215,6 +194,10 @@ async function captureComponentScreenshots(
       // non-fatal
     }
   } finally {
+    // Restore display traits to how we found them.
+    if (simulatorUdid && originalTraits) {
+      applyIosMode(simulatorUdid, originalTraits);
+    }
     // Restore everything
     if (fs.existsSync(galleryPath)) {
       fs.unlinkSync(galleryPath);
@@ -224,6 +207,115 @@ async function captureComponentScreenshots(
   }
 
   return screenshotMap;
+}
+
+// ---------------------------------------------------------------------------
+// Per-preview capture & display-trait control
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture a single preview under the already-applied display mode.
+ * Terminates any running instance, launches the gallery on the preview id,
+ * settles, screenshots, and records the result. Returns true on success.
+ */
+async function captureOneIosPreview(
+  udid,
+  bundleId,
+  preview,
+  modeId,
+  screenshotsDir,
+  screenshotMap,
+  settleMs,
+) {
+  // Terminate any running instance
+  spawnSync("xcrun", ["simctl", "terminate", udid, bundleId], {
+    encoding: "utf-8",
+  });
+
+  // Launch with gallery arg
+  const launchResult = spawnSync(
+    "xcrun",
+    ["simctl", "launch", udid, bundleId, "-fractionatorPreview", preview.id],
+    { encoding: "utf-8", timeout: 15_000 },
+  );
+
+  if (launchResult.status !== 0) {
+    console.warn(
+      `   ⚠️  Launch failed for ${preview.id} [${modeId}]: ${launchResult.stderr}`,
+    );
+    return false;
+  }
+
+  // Settle
+  await sleep(settleMs);
+
+  // Capture
+  const filename = screenshotFilename(sanitize(preview.id), modeId);
+  const destFile = path.join(screenshotsDir, filename);
+  const shotResult = spawnSync(
+    "xcrun",
+    ["simctl", "io", udid, "screenshot", destFile],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+
+  if (
+    shotResult.status === 0 &&
+    fs.existsSync(destFile) &&
+    fs.statSync(destFile).size > 0
+  ) {
+    const existing = screenshotMap.get(preview.componentName) || [];
+    existing.push({
+      path: `screenshots/${filename}`,
+      previewName: preview.previewName,
+      id: preview.id,
+      mode: modeId,
+      modeLabel: MODES[modeId].label,
+    });
+    screenshotMap.set(preview.componentName, existing);
+    return true;
+  }
+
+  console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+  return false;
+}
+
+/**
+ * Read the simulator's current appearance / content size / increase-contrast
+ * settings so they can be restored after capture. Values that come back as
+ * "unsupported"/"unknown" are dropped (and skipped on restore).
+ */
+function readIosTraits(udid) {
+  const traits = {};
+  for (const option of ["appearance", "content_size", "increase_contrast"]) {
+    const result = spawnSync("xcrun", ["simctl", "ui", udid, option], {
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    const value = (result.stdout || "").trim();
+    if (value && value !== "unsupported" && value !== "unknown") {
+      traits[option] = value;
+    }
+  }
+  return traits;
+}
+
+/**
+ * Apply a set of display traits via `simctl ui`. Tolerant of individual
+ * settings failing (e.g. a trait unsupported on an older runtime) — warns and
+ * continues rather than aborting the whole capture.
+ */
+function applyIosMode(udid, traits) {
+  for (const [option, value] of Object.entries(traits)) {
+    const result = spawnSync("xcrun", ["simctl", "ui", udid, option, value], {
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    if (result.status !== 0) {
+      console.warn(
+        `   ⚠️  Could not set ${option}=${value}: ${(result.stderr || "").trim()}`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

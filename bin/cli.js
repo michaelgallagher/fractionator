@@ -5,6 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const { globSync } = require("glob");
 const { generate } = require("../src/index");
+const { parseVariations } = require("../src/variation-modes");
 
 const program = new Command();
 
@@ -31,6 +32,10 @@ program
     "Override component directory pattern (glob)",
   )
   .option("--include-unused", "Include components defined but never used")
+  .option(
+    "--variations <list>",
+    "Also capture each preview under display traits, comma-separated: dark, type, contrast (or 'all')",
+  )
   .option("--no-screenshots", "Skip screenshot capture (static analysis only)")
   .option("--no-open", "Don't open the HTML report in a browser when finished")
   .option(
@@ -67,6 +72,14 @@ program
     const outputDir = path.resolve(opts.output);
     const formats = opts.format.split(",").map((f) => f.trim());
 
+    let variations;
+    try {
+      variations = parseVariations(opts.variations);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+
     await generate({
       sources,
       outputDir,
@@ -76,6 +89,7 @@ program
       includeUnused: opts.includeUnused || false,
       initMapping: opts.initMapping || false,
       noScreenshots: opts.screenshots === false,
+      variations,
       open: opts.open !== false,
     });
   });
