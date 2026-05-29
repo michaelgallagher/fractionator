@@ -24,7 +24,10 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  * @param {string} projectPath - Android prototype root (where gradlew lives)
  * @param {string} outputDir - Where to write screenshots
  * @param {object} [options]
- * @param {number} [options.settleMs=2000] - ms to wait after launch
+ * @param {number} [options.settleMs=2000] - ms to wait before capture on a warm
+ *   (recomposed) relaunch
+ * @param {number} [options.coldStartMs=4000] - ms to wait before capture on the
+ *   first launch, which is a cold start and shows the app splash screen
  * @returns {Map<string, object[]>} componentName → [{ path, previewName, id }]
  */
 async function captureAndroidScreenshots(
@@ -33,7 +36,7 @@ async function captureAndroidScreenshots(
   outputDir,
   options = {},
 ) {
-  const { settleMs = 2000 } = options;
+  const { settleMs = 2000, coldStartMs = 4000 } = options;
   const screenshotsDir = path.join(outputDir, "screenshots");
   fs.mkdirSync(screenshotsDir, { recursive: true });
 
@@ -120,35 +123,38 @@ async function captureAndroidScreenshots(
 
     // 7. Screenshot loop
     console.log(
-      `   Capturing ${previews.length} previews (${settleMs}ms settle)...`,
+      `   Capturing ${previews.length} previews (cold start ${coldStartMs}ms, then ${settleMs}ms settle)...`,
     );
 
+    const activityComponent = `${applicationId}/${namespace}.FractionatorGalleryActivity`;
+
+    // Warm up the process before capturing anything. The gallery activity is
+    // singleTop and handles onNewIntent, so a cold start (app boot + splash
+    // screen) only happens when the process isn't already running; every real
+    // preview is then a warm recomposition with no splash. Warming up on a
+    // throwaway id renders the lightweight "unknown preview" branch, so the
+    // splash clears quickly — even a heavy first component (e.g. a WebView,
+    // whose creation can otherwise hold the splash past a fixed delay) is then
+    // captured warm.
+    try {
+      adb(emulator, ["shell", "am", "force-stop", applicationId]);
+    } catch {
+      // non-fatal
+    }
+    await warmUp(emulator, activityComponent, coldStartMs);
+
     for (const preview of previews) {
-      // Force-stop any running instance
-      try {
-        adb(emulator, ["shell", "am", "force-stop", applicationId]);
-      } catch {
-        // non-fatal
+      // Some previews (e.g. ones that open a Chrome Custom Tab or external
+      // browser) can send the gallery to the background and get the process
+      // killed. A subsequent launch would then be a cold start and capture the
+      // splash screen. Guard against it: if the process died, re-warm on the
+      // throwaway id first so the splash is absorbed off a trivial frame.
+      if (!isProcessAlive(emulator, applicationId)) {
+        await warmUp(emulator, activityComponent, coldStartMs);
       }
 
-      // Launch gallery activity with preview ID
-      const activityComponent = `${applicationId}/${namespace}.FractionatorGalleryActivity`;
-      const launchResult = spawnSync(
-        "adb",
-        [
-          "-s",
-          emulator,
-          "shell",
-          "am",
-          "start",
-          "-n",
-          activityComponent,
-          "--es",
-          "fractionator_preview_id",
-          preview.id,
-        ],
-        { encoding: "utf-8", timeout: 15_000 },
-      );
+      // Launch gallery activity with preview ID (warm recomposition)
+      const launchResult = launchGallery(emulator, activityComponent, preview.id);
 
       if (launchResult.status !== 0) {
         console.warn(
@@ -157,7 +163,7 @@ async function captureAndroidScreenshots(
         continue;
       }
 
-      // Wait for the preview to render
+      // Wait for the warm recomposition to render, then capture.
       await sleep(settleMs);
 
       // Capture screenshot via adb
@@ -412,20 +418,35 @@ function generateGalleryActivity(previews, targetPackage) {
   return `${SENTINEL}
 package ${targetPackage}
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 ${importLines}
 
 class FractionatorGalleryActivity : ComponentActivity() {
+    // Held as snapshot state so warm relaunches (onNewIntent) recompose the
+    // gallery without restarting the process — only the first launch is a cold
+    // start, so the app splash screen is shown at most once.
+    private var previewId by mutableStateOf("")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
+        previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
         setContent {
             FractionatorGalleryContent(previewId)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
     }
 }
 
@@ -456,6 +477,7 @@ function injectManifestActivity(manifestContent) {
         <!-- ${SENTINEL} -->
         <activity
             android:name=".FractionatorGalleryActivity"
+            android:launchMode="singleTop"
             android:exported="true" />`;
 
   // Insert before the closing </application> tag
@@ -607,6 +629,54 @@ function findEmulator() {
   } catch {
     return null;
   }
+}
+
+// Throwaway preview id — hits the gallery's "unknown preview" branch, which
+// renders trivial Text so the cold-start splash clears quickly.
+const WARMUP_ID = "__fractionator_warmup__";
+
+/**
+ * Launch the gallery activity for a given preview id (does not wait/settle).
+ */
+function launchGallery(device, activityComponent, previewId) {
+  return spawnSync(
+    "adb",
+    [
+      "-s",
+      device,
+      "shell",
+      "am",
+      "start",
+      "-n",
+      activityComponent,
+      "--es",
+      "fractionator_preview_id",
+      previewId,
+    ],
+    { encoding: "utf-8", timeout: 15_000 },
+  );
+}
+
+/**
+ * Launch the gallery on the throwaway warm-up id and wait out the cold start,
+ * so the splash screen is absorbed on a trivial frame rather than a real
+ * component capture.
+ */
+async function warmUp(device, activityComponent, coldStartMs) {
+  launchGallery(device, activityComponent, WARMUP_ID);
+  await sleep(coldStartMs);
+}
+
+/**
+ * Whether the app process is currently running on the device.
+ */
+function isProcessAlive(device, applicationId) {
+  const result = spawnSync(
+    "adb",
+    ["-s", device, "shell", "pidof", applicationId],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+  return result.status === 0 && result.stdout.trim().length > 0;
 }
 
 /**

@@ -169,6 +169,10 @@ When scanning an Android prototype (without `--no-screenshots`), fractionator:
 6. For each preview: launches the gallery activity with an intent extra identifying the preview, waits for it to render, and captures a screenshot via `adb exec-out screencap`
 7. Cleans up — removes the generated activity file and restores the original manifest
 
+**Avoiding the splash screen.** Apps typically show a splash screen on every cold start, so capturing each preview from a freshly launched process would photograph the splash instead of the component. To avoid this, the gallery activity is declared `singleTop` and updates on `onNewIntent`, so the process is started **once** (a throwaway warm-up launch absorbs the cold start and its splash on a trivial frame) and every real preview is then a fast warm recomposition. If a preview causes the process to die mid-run, the next capture re-warms first rather than photographing the cold-start splash.
+
+**Known limitation — live/async content.** Components that load remote content (e.g. a `WebView` pointing at a live URL) or run long animations may capture before their content has loaded, showing a blank or partial frame. This depends on network/timing and isn't always reproducible. The warm settle time is tunable in `captureAndroidScreenshots` (`settleMs`) if a particular prototype needs longer.
+
 Android screenshots skip `private` and `internal` preview functions (inaccessible from the gallery activity). Unlike iOS, there are no `@Previewable` limitations — Compose preview functions are standalone, so coverage is typically 90%+.
 
 The tool logs how many previews it found versus how many it captured. Use `--no-screenshots` to skip the entire process if you only need static analysis.
