@@ -2,6 +2,7 @@ const { execSync, spawnSync } = require("child_process");
 const { globSync } = require("glob");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { MODES, screenshotFilename } = require("./variation-modes");
 
 // Sentinel comment so we can detect our own injections
@@ -43,6 +44,10 @@ async function captureAndroidScreenshots(
   const modes = options.modes && options.modes.length ? options.modes : ["baseline"];
   const screenshotsDir = path.join(outputDir, "screenshots");
   fs.mkdirSync(screenshotsDir, { recursive: true });
+
+  // Ensure ANDROID_HOME is set so Gradle can find the SDK, falling back to the
+  // standard per-OS install location when the env var is unset.
+  ensureAndroidHome();
 
   // 1. Extract preview functions from component files
   const previews = extractAllKotlinPreviews(components, projectPath);
@@ -640,6 +645,45 @@ function findMainSourceDir(appModule, namespace) {
 // ---------------------------------------------------------------------------
 // Build / ADB helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Ensure process.env.ANDROID_HOME points at an SDK so Gradle (and adb) can find
+ * it without the user exporting the variable first.
+ *
+ * Honours an already-set ANDROID_HOME / ANDROID_SDK_ROOT when it exists on
+ * disk; otherwise falls back to the standard per-OS install location. Returns
+ * the resolved path, or null if nothing was found (the Gradle build will then
+ * surface its own SDK-not-found error).
+ */
+function ensureAndroidHome() {
+  const existing = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
+  if (existing && fs.existsSync(existing)) {
+    if (!process.env.ANDROID_HOME) process.env.ANDROID_HOME = existing;
+    return process.env.ANDROID_HOME;
+  }
+
+  const home = os.homedir();
+  let candidate;
+  if (process.platform === "darwin") {
+    candidate = path.join(home, "Library", "Android", "sdk");
+  } else if (process.platform === "win32") {
+    candidate = path.join(
+      process.env.LOCALAPPDATA || path.join(home, "AppData", "Local"),
+      "Android",
+      "Sdk",
+    );
+  } else {
+    candidate = path.join(home, "Android", "Sdk");
+  }
+
+  if (fs.existsSync(candidate)) {
+    process.env.ANDROID_HOME = candidate;
+    console.log(`   Using detected Android SDK: ${candidate}`);
+    return candidate;
+  }
+
+  return null;
+}
 
 /**
  * Find a running Android emulator via adb.
