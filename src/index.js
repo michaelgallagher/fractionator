@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const { spawn } = require("child_process");
 const { scanSwiftComponents } = require("./swift-component-scanner");
 const {
   scanKotlinComponents,
@@ -286,6 +287,41 @@ async function generate(options) {
   console.log(`\nWriting output to ${outputDir}`);
   buildReport(catalogue, outputDir, formats);
   console.log("\nDone.");
+
+  // Open the HTML report in the default browser, unless suppressed.
+  if (formats.includes("html") && options.open !== false) {
+    const reportPath = path.join(outputDir, "index.html");
+    openInBrowser(reportPath);
+  }
+}
+
+/**
+ * Open a file in the system default application (a browser, for index.html).
+ * Best-effort and non-blocking — failures are reported but don't stop the run.
+ */
+function openInBrowser(filePath) {
+  const opener =
+    process.platform === "darwin"
+      ? { cmd: "open", args: [filePath] }
+      : process.platform === "win32"
+        ? { cmd: "cmd", args: ["/c", "start", "", filePath] }
+        : { cmd: "xdg-open", args: [filePath] };
+
+  try {
+    const child = spawn(opener.cmd, opener.args, {
+      stdio: "ignore",
+      detached: true,
+    });
+    child.on("error", (err) => {
+      console.warn(`   Could not open browser: ${err.message}`);
+      console.warn(`   Open it manually: ${filePath}`);
+    });
+    child.unref();
+    console.log(`Opening ${filePath}`);
+  } catch (err) {
+    console.warn(`   Could not open browser: ${err.message}`);
+    console.warn(`   Open it manually: ${filePath}`);
+  }
 }
 
 module.exports = { generate };

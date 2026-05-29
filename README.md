@@ -75,8 +75,11 @@ fractionator --components-dir "**/DesignSystem/**/*.swift"
 | `--components-dir <glob>` | Override the component directory pattern | per-platform heuristic |
 | `--include-unused` | Include components that are defined but never used | `false` |
 | `--no-screenshots` | Skip screenshot capture (static analysis only) | `false` |
+| `--no-open` | Don't open the HTML report in a browser when finished | opens by default |
 
 If no `--ios`, `--android`, or `--web` flag is given, fractionator detects the project type from the current directory. When pointing at multiple prototypes explicitly, pass each flag.
+
+When the run finishes, fractionator opens the generated `index.html` in your default browser (using `open` on macOS, `xdg-open` on Linux, `start` on Windows). Pass `--no-open` to suppress this — useful in CI or scripted runs. The report is only opened when the `html` format is produced.
 
 ## Output
 

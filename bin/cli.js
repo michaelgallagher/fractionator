@@ -32,6 +32,7 @@ program
   )
   .option("--include-unused", "Include components defined but never used")
   .option("--no-screenshots", "Skip screenshot capture (static analysis only)")
+  .option("--no-open", "Don't open the HTML report in a browser when finished")
   .option(
     "--init-mapping",
     "Generate a starter mapping file from auto-detected components and exit",
@@ -75,6 +76,7 @@ program
       includeUnused: opts.includeUnused || false,
       initMapping: opts.initMapping || false,
       noScreenshots: opts.screenshots === false,
+      open: opts.open !== false,
     });
   });
 
