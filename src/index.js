@@ -22,15 +22,10 @@ const { loadMapping } = require("./mapping-loader");
  * catalogue, and writes output files.
  */
 async function generate(options) {
-  const {
-    sources,
-    outputDir,
-    formats,
-    componentsDirOverride,
-    includeUnused,
-  } = options;
+  const { sources, outputDir, formats, componentsDirOverride, includeUnused } =
+    options;
 
-  console.log("Fractionator — Component Catalogue\n");
+  console.log("🧬  Fractionator\n");
 
   const catalogue = { platforms: {} };
 
