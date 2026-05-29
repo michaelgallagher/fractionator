@@ -52,6 +52,16 @@ Static analysis working end-to-end. Running against the NHS App Android prototyp
 
 Screenshot capture is now implemented for Android — generates a gallery activity, builds via Gradle, and captures via `adb screencap`.
 
+### Phase 3 — Cross-platform alignment: ✅ complete
+
+Matching runs over the full (unfiltered) component set per platform in three passes — manual mapping first, then exact name match, then conservative normalized match (strip a configurable prefix list, default `["NHS"]`, plus suffixes `UI`/`View`/`Component`, then lowercase). Leftovers become "platform-only". Each concept records its `source` (`mapping`/`exact`/`normalized`/platform), `status`, and a `drift` flag when matched names differ.
+
+- **Alignment table** in the HTML report (rendered only with 2+ platforms) between the summary and component list, with aligned / name-drift / platform-only status badges. Also emitted in the JSON (`catalogue.alignment`) and Markdown outputs.
+- **`--mapping <path>`** loads and validates a curated `component-mapping.yaml`; mapping entries win over auto-matching, and names referenced in the mapping but not detected are surfaced as `missing` for curation.
+- **`--init-mapping`** scans statically (no screenshots), writes a pre-filled starter `component-mapping.yaml` to the output directory, and exits before building the report.
+
+Against the NHS App iOS + Android prototypes, the conservative normalizer correctly produces **zero false auto-matches** (e.g. `ProfileCard` normalizes to `profilecard`, not `card`) — the real cross-platform concepts (`RowLink` ↔ `NHSRowItem`, `ProfileCard` ↔ `NHSCard`) require the curated mapping file, which is the intended design.
+
 ### What we learned building Phase 1 and 2
 
 **Component detection works well.** The regex-based `struct Foo: View` scanner with brace-depth tracking is reliable. Comment stripping (including nested `/* */` blocks) prevents false matches. Filtering to `**/Components/**/*.swift` (or a configurable glob) gives the right set.
@@ -267,9 +277,10 @@ src/
   usage-scanner.js                Find call sites across source files (language-agnostic with config)
   variant-grouper.js              Group call-site arguments into distinct variants (Swift + Kotlin syntax)
   build-report.js                 Generate HTML/JSON/MD output
+  cross-platform-matcher.js       Auto-match (exact + normalized) + apply mapping file
+  mapping-loader.js               Load + validate component-mapping.yaml
+  mapping-generator.js            Generate starter component-mapping.yaml
   nunjucks-component-scanner.js   [Phase 4] Find macro definitions + param keys
-  cross-platform-matcher.js       [Phase 3] Auto-match + apply mapping file
-  mapping-generator.js            [Phase 3] Generate starter component-mapping.yaml
 ```
 
 No shared code with Quiver. The scanners are simpler than Quiver's parsers (no navigation graph construction, no route resolution, no seed-data tracking) but different in shape (component-centric rather than screen-centric). The screenshot pipeline shares the same simctl-based approach but targets individual component previews rather than navigation routes.
@@ -292,11 +303,11 @@ No shared code with Quiver. The scanners are simpler than Quiver's parsers (no n
 9. ~~**Variant grouper dual syntax** — parse both `name: value` (Swift) and `name = value` (Kotlin) named-argument syntax.~~
 10. ~~**Compose screenshot capture** — generate a gallery activity importing all public @Preview functions, register in AndroidManifest.xml, build via Gradle, capture via `adb exec-out screencap -p`. Private preview functions are automatically skipped.~~
 
-### Phase 3 — Cross-platform alignment
+### Phase 3 — Cross-platform alignment ✅
 
-10. **Auto-matcher** — exact name + prefix stripping.
-11. **Mapping file** — `component-mapping.yaml` format, `--init-mapping` generator.
-12. **Alignment table in report** — matched pairs, platform-only, name drift.
+10. ~~**Auto-matcher** — exact name + conservative normalized matching (prefix/suffix stripping).~~
+11. ~~**Mapping file** — `component-mapping.yaml` format, `--mapping` loader, `--init-mapping` generator.~~
+12. ~~**Alignment table in report** — matched pairs, platform-only, name drift (HTML + JSON + Markdown).~~
 
 ### Phase 4 — Web support
 

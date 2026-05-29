@@ -85,6 +85,7 @@ If no `--ios`, `--android`, or `--web` flag is given, fractionator detects the p
 A single self-contained page (no server needed) with:
 
 - **Summary stats** — component count, total usages, unused count, single-use count
+- **Cross-platform alignment table** — shown when two or more platforms are scanned: which concepts are shared, which names drift between platforms, and which are platform-only (see below)
 - **Component cards** — one per component, each showing:
   - Screenshots of rendered previews in a horizontal scrollable strip (click to expand)
   - Platform badge, usage count, variant count
@@ -101,6 +102,41 @@ The full catalogue as structured data. Useful for feeding into other tools, CI c
 ### Markdown (`catalogue.md`)
 
 A summary table for pasting into documentation or design decision records.
+
+## Cross-platform alignment
+
+When you scan two or more platforms, fractionator matches components across them so you can see what's shared, what's named differently, and what's missing on a platform. Matching runs in three passes:
+
+1. **Manual mapping** from a `component-mapping.yaml` (highest priority)
+2. **Exact name match** across platforms
+3. **Normalized match** — strips a configurable prefix (default `NHS`) and common suffixes (`UI`, `View`, `Component`), then compares case-insensitively, so `NHSCard` ↔ `NHSCardUI` line up
+
+Anything left over is reported as *platform-only*. Matched concepts whose names differ across platforms are flagged as *name drift*.
+
+Automated matching is deliberately conservative — semantically equivalent components with unrelated names (e.g. iOS `RowLink` ↔ Android `NHSRowItem`) won't match automatically. Capture those in a mapping file:
+
+```bash
+# Generate a starter mapping from detected components, then curate it
+fractionator --ios ~/ios-proto --android ~/android-proto --init-mapping
+# edit catalogue-output/component-mapping.yaml — link concepts, fill in nulls
+
+# Re-run with the curated mapping
+fractionator --ios ~/ios-proto --android ~/android-proto \
+  --mapping catalogue-output/component-mapping.yaml
+```
+
+```yaml
+# component-mapping.yaml
+mappings:
+  - concept: "Row link"
+    ios: RowLink
+    android: NHSRowItem
+  - concept: "Profile / NHS card"
+    ios: ProfileCard
+    android: NHSCard
+```
+
+Mapping entries override automated matches. Names referenced in the mapping but not found in the scan are surfaced in the output so curation mistakes are visible.
 
 ## How screenshot capture works
 
@@ -180,6 +216,9 @@ src/
   kotlin-screenshot-capture.js    @Preview screenshot capture via adb + gallery activity
   usage-scanner.js                Call-site detection across source files (multi-language)
   variant-grouper.js              Group usages by parameter combinations
+  cross-platform-matcher.js       Match components across platforms (exact + normalized + mapping)
+  mapping-loader.js               Load + validate component-mapping.yaml
+  mapping-generator.js            Generate a starter component-mapping.yaml (--init-mapping)
   build-report.js                 HTML / JSON / Markdown output
 docs/
   plans/component-catalogue.md    Full plan with status and design decisions

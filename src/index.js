@@ -1,4 +1,5 @@
 const path = require("path");
+const fs = require("fs");
 const { scanSwiftComponents } = require("./swift-component-scanner");
 const {
   scanKotlinComponents,
@@ -11,6 +12,9 @@ const { groupVariants } = require("./variant-grouper");
 const { buildReport } = require("./build-report");
 const { captureComponentScreenshots } = require("./swift-screenshot-capture");
 const { captureAndroidScreenshots } = require("./kotlin-screenshot-capture");
+const { matchComponents } = require("./cross-platform-matcher");
+const { generateMappingYaml } = require("./mapping-generator");
+const { loadMapping } = require("./mapping-loader");
 
 /**
  * Main entry point. Scans the provided prototype sources, builds the
@@ -28,6 +32,11 @@ async function generate(options) {
   console.log("Fractionator — Component Catalogue\n");
 
   const catalogue = { platforms: {} };
+
+  // Unfiltered component lists per platform, for cross-platform matching.
+  // (Unused components still matter for alignment, so this is collected from
+  // the full entry list — before the --include-unused filter.)
+  const platformComponents = {};
 
   // --- iOS / SwiftUI ---
   if (sources.ios) {
@@ -51,7 +60,7 @@ async function generate(options) {
 
     // Capture screenshots of component previews
     let screenshotMap = new Map();
-    if (!options.noScreenshots) {
+    if (!options.noScreenshots && !options.initMapping) {
       try {
         screenshotMap = await captureComponentScreenshots(
           components,
@@ -98,6 +107,11 @@ async function generate(options) {
         })),
       };
     });
+
+    platformComponents.ios = entries.map((e) => ({
+      name: e.name,
+      relativePath: e.relativePath,
+    }));
 
     // Filter unused if not requested
     const filtered = includeUnused
@@ -155,7 +169,7 @@ async function generate(options) {
 
     // Capture screenshots of component previews
     let androidScreenshotMap = new Map();
-    if (!options.noScreenshots) {
+    if (!options.noScreenshots && !options.initMapping) {
       try {
         androidScreenshotMap = await captureAndroidScreenshots(
           androidComponents,
@@ -204,6 +218,11 @@ async function generate(options) {
       };
     });
 
+    platformComponents.android = androidEntries.map((e) => ({
+      name: e.name,
+      relativePath: e.relativePath,
+    }));
+
     // Filter unused if not requested
     const androidFiltered = includeUnused
       ? androidEntries
@@ -230,6 +249,37 @@ async function generate(options) {
   // --- Web / Nunjucks (Phase 4 — placeholder) ---
   if (sources.web) {
     console.log(`\nWeb support is not yet implemented (Phase 4)`);
+  }
+
+  // --- Cross-platform alignment (Phase 3) ---
+
+  // --init-mapping: write a starter mapping file and exit before building the
+  // report. Screenshot capture is already skipped above when initMapping is set.
+  if (options.initMapping) {
+    const yamlText = generateMappingYaml(platformComponents);
+    fs.mkdirSync(outputDir, { recursive: true });
+    const mappingFile = path.join(outputDir, "component-mapping.yaml");
+    fs.writeFileSync(mappingFile, yamlText);
+    console.log(`\nWrote starter mapping to ${mappingFile}`);
+    console.log("Curate it, then re-run with --mapping <path>.");
+    return;
+  }
+
+  let mapping = null;
+  if (options.mappingPath) {
+    mapping = loadMapping(options.mappingPath);
+    console.log(`\nLoaded component mapping: ${options.mappingPath}`);
+  }
+
+  // Alignment is only meaningful across 2+ platforms.
+  if (Object.keys(platformComponents).length >= 2) {
+    catalogue.alignment = matchComponents(platformComponents, mapping);
+    const matched = catalogue.alignment.filter(
+      (a) => a.status === "matched",
+    ).length;
+    console.log(
+      `\nCross-platform alignment: ${matched} matched concept${matched !== 1 ? "s" : ""}, ${catalogue.alignment.length - matched} platform-only`,
+    );
   }
 
   // --- Build output ---

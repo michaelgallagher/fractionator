@@ -52,6 +52,13 @@ function renderHtml(catalogue) {
   const unused = allComponents.filter((c) => c.usageCount === 0);
   const singleUse = allComponents.filter((c) => c.usageCount === 1);
 
+  // Canonical platform column order, limited to platforms actually present.
+  const platformOrder = ["ios", "android", "web"].filter((p) => platforms[p]);
+  const alignmentSection =
+    catalogue.alignment && platformOrder.length >= 2
+      ? renderAlignment(catalogue.alignment, platformOrder)
+      : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -91,6 +98,8 @@ ${CSS}
     </div>
   </section>
 
+  ${alignmentSection}
+
   <section class="controls">
     <input type="text" id="search" placeholder="Filter components..." autocomplete="off">
     <label>
@@ -114,6 +123,54 @@ ${JS}
 </script>
 </body>
 </html>`;
+}
+
+const PLATFORM_LABELS = { ios: "iOS", android: "Android", web: "Web" };
+
+function renderAlignment(alignment, platformOrder) {
+  const matched = alignment.filter((a) => a.status === "matched");
+  const platformOnly = alignment.filter((a) => a.status === "platform-only");
+
+  const headCells = platformOrder
+    .map((p) => `<th>${PLATFORM_LABELS[p] || esc(p)}</th>`)
+    .join("");
+
+  const rows = alignment
+    .map((entry) => {
+      const cells = platformOrder
+        .map((p) => {
+          const name = entry.platforms[p];
+          return name
+            ? `<td class="align-name">${esc(name)}</td>`
+            : `<td class="align-absent">—</td>`;
+        })
+        .join("");
+
+      const statusBadge =
+        entry.status === "platform-only"
+          ? `<span class="badge badge-platform-only">platform-only</span>`
+          : entry.drift
+            ? `<span class="badge badge-drift">name drift</span>`
+            : `<span class="badge badge-aligned">aligned</span>`;
+
+      return `<tr class="${entry.drift ? "row-drift" : ""}">
+        <td class="align-concept">${esc(entry.concept)}</td>
+        ${cells}
+        <td>${statusBadge}</td>
+      </tr>`;
+    })
+    .join("\n        ");
+
+  return `<section class="alignment">
+    <h2>Cross-platform alignment</h2>
+    <p class="alignment-summary">${matched.length} shared concept${matched.length !== 1 ? "s" : ""} · ${platformOnly.length} platform-only</p>
+    <table class="alignment-table">
+      <thead><tr><th>Concept</th>${headCells}<th>Status</th></tr></thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table>
+  </section>`;
 }
 
 function renderComponentCard(comp) {
@@ -338,6 +395,25 @@ select {
 .variant-count { font-weight: 600; text-align: center; min-width: 3rem; }
 
 .component-card.hidden { display: none; }
+
+.alignment { margin-bottom: 2rem; }
+.alignment h2 { font-size: 1rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.35rem; }
+.alignment-summary { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.75rem; }
+.alignment-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.alignment-table th { text-align: left; font-weight: 600; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.alignment-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.alignment-table tr:last-child td { border-bottom: none; }
+.align-concept { font-weight: 600; }
+.align-name { font-family: var(--mono); font-size: 0.8rem; }
+.align-absent { color: var(--text-secondary); text-align: center; }
+.alignment-table tr.row-drift { background: var(--variant-bg); }
+.badge-drift { background: #fef3c7; color: #92400e; }
+.badge-aligned { background: #dcfce7; color: #166534; }
+.badge-platform-only { background: var(--badge-bg); color: var(--text-secondary); }
+@media (prefers-color-scheme: dark) {
+  .badge-drift { background: #422006; color: #fbbf24; }
+  .badge-aligned { background: #052e16; color: #4ade80; }
+}
 `;
 
 // ---------------------------------------------------------------------------
@@ -428,6 +504,28 @@ function renderMarkdown(catalogue) {
       lines.push(
         `| ${comp.name} | ${comp.usageCount} | ${comp.variants.length} | ${screens || "—"} |`,
       );
+    }
+    lines.push("");
+  }
+
+  const platformOrder = ["ios", "android", "web"].filter(
+    (p) => catalogue.platforms[p],
+  );
+  if (catalogue.alignment && platformOrder.length >= 2) {
+    lines.push("## Cross-platform alignment\n");
+    const headers = ["Concept", ...platformOrder.map((p) => PLATFORM_LABELS[p] || p), "Status"];
+    lines.push(`| ${headers.join(" | ")} |`);
+    lines.push(`|${headers.map(() => "---").join("|")}|`);
+
+    for (const entry of catalogue.alignment) {
+      const cells = platformOrder.map((p) => entry.platforms[p] || "—");
+      const status =
+        entry.status === "platform-only"
+          ? "platform-only"
+          : entry.drift
+            ? "name drift"
+            : "aligned";
+      lines.push(`| ${entry.concept} | ${cells.join(" | ")} | ${status} |`);
     }
     lines.push("");
   }
