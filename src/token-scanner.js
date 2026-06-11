@@ -233,16 +233,19 @@ function androidTokenSpec(stripComments) {
         display: `colorScheme.${m[1]}`,
         kind: "semantic",
       })),
-      // Brand object reference: NHSLightColors.blue — resolved to hex later via
-      // the scoped val-def map. The object name is retained so light/dark
-      // palettes stay distinct.
-      matcher(/\b([A-Z]\w*Colors)\.([a-z]\w*)/g, (m) => ({
-        key: `${m[1]}.${m[2]}`,
-        display: `${m[1]}.${m[2]}`,
-        kind: "alias",
-        object: m[1],
-        prop: m[2],
-      })),
+      // Brand object reference: NHSLightColors.blue. The original object name is
+      // kept for resolution, but the display/key drop the Light/Dark word so the
+      // two sides of a palette pair collapse into one token (NHSColors.blue).
+      matcher(/\b([A-Z]\w*Colors)\.([a-z]\w*)/g, (m) => {
+        const base = m[1].replace(/(Light|Dark)/, "");
+        return {
+          key: `${base}.${m[2]}`,
+          display: `${base}.${m[2]}`,
+          kind: "alias",
+          object: m[1],
+          prop: m[2],
+        };
+      }),
       // Bare Compose constant: Color.White
       matcher(/\bColor\.([A-Z]\w*)/g, (m) => ({
         key: m[1],

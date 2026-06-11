@@ -184,13 +184,21 @@ function readColorAliases(projectPath) {
 
 /**
  * Build an Android color resolver from `val x = Color(0x…)` definitions and
- * `colors.xml`. Definitions inside an `object Foo { … }` are indexed both as
- * `Foo.x` and as bare `x` (last definition wins for the bare form).
+ * `colors.xml`.
+ *
+ * Compose has no asset catalog, so light/dark colors are expressed as parallel
+ * palette `object`s — e.g. `NHSLightColors` and `NHSDarkColors`, each with the
+ * same property names. We pair these by their *scheme base* (the object name
+ * with the `Light`/`Dark` word removed) so that a reference to either side
+ * resolves to the same `{light, dark}` value and the two collapse into a single
+ * token — the same way an iOS asset's light and dark appearances do.
  *
  * @param {string} projectPath - Android project root
  */
 function buildAndroidColorResolver(projectPath) {
   const named = new Map(); // "Object.prop" and bare "prop" → hex
+  // base scheme (e.g. "NHSColors") + prop → { light?, dark? }
+  const schemes = new Map();
 
   const files = globSync("**/*.kt", {
     cwd: projectPath,
@@ -205,14 +213,18 @@ function buildAndroidColorResolver(projectPath) {
     } catch {
       continue;
     }
-    indexKotlinColorDefs(src, named);
+    indexKotlinColorDefs(src, named, schemes);
   }
 
   readColorsXml(projectPath, named);
 
   function resolve(key, kind, hit) {
-    // Object-qualified brand reference (NHSLightColors.blue).
+    // Object-qualified brand reference (NHSLightColors.blue) — return the paired
+    // light/dark value for its scheme so both sides merge into one token.
     if (hit && hit.object && hit.prop) {
+      const { base } = schemeMode(hit.object);
+      const paired = schemes.get(`${base}|${hit.prop}`);
+      if (paired && (paired.light || paired.dark)) return { ...paired };
       const hex =
         named.get(`${hit.object}.${hit.prop}`) || named.get(hit.prop);
       return hex ? { light: hex } : null;
@@ -227,8 +239,26 @@ function buildAndroidColorResolver(projectPath) {
   return { resolve };
 }
 
-/** Index `val NAME = Color(0x…)` defs, scoped to their enclosing `object`. */
-function indexKotlinColorDefs(src, named) {
+/**
+ * Split a palette object name into its scheme base and light/dark mode.
+ * `NHSLightColors` → { base: "NHSColors", mode: "light" }.
+ * `NHSHighContrastDarkColors` → { base: "NHSHighContrastColors", mode: "dark" }.
+ * A name without Light/Dark is treated as a light-only scheme keyed by itself.
+ */
+function schemeMode(objectName) {
+  if (/Dark/.test(objectName))
+    return { base: objectName.replace("Dark", ""), mode: "dark" };
+  if (/Light/.test(objectName))
+    return { base: objectName.replace("Light", ""), mode: "light" };
+  return { base: objectName, mode: "light" };
+}
+
+/**
+ * Index `val NAME = Color(0x…)` defs, scoped to their enclosing `object`. Fills
+ * `named` (bare and `Object.prop` keys) and `schemes` (paired light/dark per
+ * scheme base).
+ */
+function indexKotlinColorDefs(src, named, schemes) {
   const lines = src.split("\n");
   const objectStack = [];
   let depth = 0;
@@ -243,7 +273,16 @@ function indexKotlinColorDefs(src, named) {
       const prop = valMatch[1];
       named.set(prop, hex); // bare (last wins)
       const obj = objectStack[objectStack.length - 1];
-      if (obj) named.set(`${obj.name}.${prop}`, hex);
+      if (obj) {
+        named.set(`${obj.name}.${prop}`, hex);
+        if (schemes) {
+          const { base, mode } = schemeMode(obj.name);
+          const schemeKey = `${base}|${prop}`;
+          const entry = schemes.get(schemeKey) || {};
+          entry[mode] = hex;
+          schemes.set(schemeKey, entry);
+        }
+      }
     }
 
     // Track brace depth to pop objects as their blocks close.
@@ -302,4 +341,5 @@ module.exports = {
   colorsetToHex,
   componentsToHex,
   parseComponent,
+  schemeMode,
 };

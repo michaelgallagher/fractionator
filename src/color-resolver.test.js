@@ -3,7 +3,33 @@ const assert = require("node:assert");
 const {
   colorsetToHex,
   parseComponent,
+  schemeMode,
 } = require("./color-resolver");
+
+test("schemeMode pairs light and dark palette objects by base", () => {
+  assert.deepStrictEqual(schemeMode("NHSLightColors"), {
+    base: "NHSColors",
+    mode: "light",
+  });
+  assert.deepStrictEqual(schemeMode("NHSDarkColors"), {
+    base: "NHSColors",
+    mode: "dark",
+  });
+  // High-contrast pair shares its own base, distinct from the normal scheme.
+  assert.deepStrictEqual(schemeMode("NHSHighContrastLightColors"), {
+    base: "NHSHighContrastColors",
+    mode: "light",
+  });
+  assert.deepStrictEqual(schemeMode("NHSHighContrastDarkColors"), {
+    base: "NHSHighContrastColors",
+    mode: "dark",
+  });
+  // No mode word → light-only scheme keyed by itself.
+  assert.deepStrictEqual(schemeMode("BrandColors"), {
+    base: "BrandColors",
+    mode: "light",
+  });
+});
 
 test("parseComponent handles float, integer, and hex forms", () => {
   assert.strictEqual(parseComponent("0.5"), 0.5);
