@@ -1,7 +1,10 @@
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
-const { scanSwiftComponents } = require("./swift-component-scanner");
+const {
+  scanSwiftComponents,
+  stripSwiftComments,
+} = require("./swift-component-scanner");
 const {
   scanKotlinComponents,
   stripKotlinComments,
@@ -16,6 +19,16 @@ const { captureAndroidScreenshots } = require("./kotlin-screenshot-capture");
 const { matchComponents } = require("./cross-platform-matcher");
 const { generateMappingYaml } = require("./mapping-generator");
 const { loadMapping } = require("./mapping-loader");
+const {
+  scanTokens,
+  iosTokenSpec,
+  androidTokenSpec,
+} = require("./token-scanner");
+const {
+  buildIosColorResolver,
+  buildAndroidColorResolver,
+} = require("./color-resolver");
+const { buildTokenCatalogue } = require("./token-catalogue");
 
 /**
  * Main entry point. Scans the provided prototype sources, builds the
@@ -27,7 +40,7 @@ async function generate(options) {
 
   console.log("🧬  Fractionator\n");
 
-  const catalogue = { platforms: {} };
+  const catalogue = { platforms: {}, tokens: {} };
 
   // Unfiltered component lists per platform, for cross-platform matching.
   // (Unused components still matter for alignment, so this is collected from
@@ -122,6 +135,18 @@ async function generate(options) {
       unusedCount: entries.filter((e) => e.usageCount === 0).length,
       components: filtered,
     };
+
+    // Design tokens — colors, type sizes, spacing — across all Swift files.
+    const iosTokenOccurrences = scanTokens(
+      allSwiftFiles,
+      sources.ios,
+      iosTokenSpec(stripSwiftComments),
+    );
+    catalogue.tokens.ios = buildTokenCatalogue(
+      iosTokenOccurrences,
+      buildIosColorResolver(sources.ios),
+    );
+    logTokenSummary(catalogue.tokens.ios);
 
     const unusedNames = entries
       .filter((e) => e.usageCount === 0)
@@ -234,6 +259,18 @@ async function generate(options) {
       components: androidFiltered,
     };
 
+    // Design tokens — colors, type sizes, spacing — across all Kotlin files.
+    const androidTokenOccurrences = scanTokens(
+      allKotlinFiles,
+      sources.android,
+      androidTokenSpec(stripKotlinComments),
+    );
+    catalogue.tokens.android = buildTokenCatalogue(
+      androidTokenOccurrences,
+      buildAndroidColorResolver(sources.android),
+    );
+    logTokenSummary(catalogue.tokens.android);
+
     const unusedAndroid = androidEntries
       .filter((e) => e.usageCount === 0)
       .map((e) => e.name);
@@ -319,6 +356,13 @@ function openInBrowser(filePath) {
     console.warn(`   Could not open browser: ${err.message}`);
     console.warn(`   Open it manually: ${filePath}`);
   }
+}
+
+/** Print a one-line summary of the tokens captured for a platform. */
+function logTokenSummary(tokens) {
+  console.log(
+    `   ${tokens.colors.length} colors, ${tokens.typography.length} type sizes, ${tokens.spacing.length} spacing units`,
+  );
 }
 
 module.exports = { generate };

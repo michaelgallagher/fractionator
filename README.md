@@ -10,7 +10,8 @@ Point fractionator at one or more prototype projects and it will:
 - **Count and locate usages** — every call site across the codebase, with file, line number, and enclosing view/screen
 - **Group parameter variants** — cluster call sites by the arguments passed, so you can see how many distinct styles of each component exist (e.g. NHSSection with 11 different border/background colour combinations)
 - **Capture screenshots** — render SwiftUI `#Preview` blocks in the iOS Simulator and photograph each one
-- **Output a report** — a self-contained HTML page with filterable/sortable component cards, screenshot strips, signature details, and variant breakdowns. Also available as JSON or Markdown.
+- **Catalogue style tokens** — scan every source file for the colors, type sizes, and spacing units actually in use, resolving named colors to real hex values (light *and* dark) from asset catalogs and theme definitions, then present them as a palette, type scale, and spacing scale
+- **Output a report** — a self-contained HTML page with filterable/sortable component cards, screenshot strips, signature details, and variant breakdowns, plus a **Style tokens** tab. Also available as JSON or Markdown.
 
 ## Requirements
 
@@ -19,7 +20,7 @@ Point fractionator at one or more prototype projects and it will:
 - **Android SDK** and a running Android emulator (for Android screenshot capture)
 - macOS (iOS screenshot capture uses `xcrun simctl`)
 
-Screenshots are optional — pass `--no-screenshots` to skip the build/capture step entirely. Static analysis (component detection, usage scanning, variant grouping) works without Xcode or Android SDK.
+Screenshots are optional — pass `--no-screenshots` to skip the build/capture step entirely. Static analysis (component detection, usage scanning, variant grouping, and style-token capture) works without Xcode or Android SDK.
 
 ## Install
 

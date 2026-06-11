@@ -1,5 +1,13 @@
 # Plan: Style Tokens tab
 
+> **Status: implemented.** All six phases shipped. New modules
+> `src/token-scanner.js`, `src/color-resolver.js`, `src/token-catalogue.js`
+> (each with a `*.test.js`), wired through `src/index.js` and rendered by
+> `src/build-report.js` (HTML tab + Markdown tables + JSON). One refinement
+> against the original plan: colors merge by the **light+dark** hex pair (not
+> light alone) so adaptive colors stay distinct from their non-adapting "Only"
+> twins, while true synonyms (e.g. `textLink` → `nhsBlue`) still merge.
+
 Capture, catalogue, and display the design tokens used across the scanned
 prototypes — **colors**, **type sizes**, and **spacing units** — as a new tab in
 the HTML output (and as data in the JSON / Markdown outputs).

@@ -61,6 +61,11 @@ function renderHtml(catalogue) {
 
   const hasAlignment = alignmentSection !== "";
 
+  const tokensSection =
+    catalogue.tokens && hasAnyTokens(catalogue.tokens)
+      ? renderTokens(catalogue.tokens, platformOrder)
+      : "";
+
   const generatedAt = new Date().toLocaleString(undefined, {
     dateStyle: "long",
     timeStyle: "short",
@@ -92,17 +97,11 @@ ${CSS}
     <p class="generated-at">Generated ${esc(generatedAt)}</p>
   </header>
 
-  ${
-    hasAlignment
-      ? `<div class="tab-bar" role="tablist">
-    <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-components" data-tab="components">Components</button>
-    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-alignment" data-tab="alignment">Cross-platform alignment</button>
-  </div>`
-      : ""
-  }
-
-  <div class="tab-panel${hasAlignment ? "" : " tab-panel-solo"}" id="tab-components">
-    <section class="summary">
+  ${renderTabs([
+    {
+      id: "components",
+      label: "Components",
+      content: `<section class="summary">
       <h2>Summary</h2>
       <div class="stats-grid">
         <div class="stat">
@@ -139,16 +138,21 @@ ${CSS}
 
     <section class="components" id="components">
       ${allComponents.map((c) => renderComponentCard(c)).join("\n      ")}
-    </section>
-  </div>
-
-  ${
-    hasAlignment
-      ? `<div class="tab-panel hidden" id="tab-alignment">
-    ${alignmentSection}
-  </div>`
-      : ""
-  }
+    </section>`,
+    },
+    ...(tokensSection
+      ? [{ id: "tokens", label: "Style tokens", content: tokensSection }]
+      : []),
+    ...(hasAlignment
+      ? [
+          {
+            id: "alignment",
+            label: "Cross-platform alignment",
+            content: alignmentSection,
+          },
+        ]
+      : []),
+  ])}
 </div>
 
 <script>
@@ -159,6 +163,171 @@ ${JS}
 }
 
 const PLATFORM_LABELS = { ios: "iOS", android: "Android", web: "Web" };
+
+/**
+ * Render a set of tabs. A single tab renders without a tab bar (solo panel);
+ * multiple tabs render a tab bar plus one panel each, the first one active.
+ */
+function renderTabs(tabs) {
+  if (tabs.length === 1) {
+    return `<div class="tab-panel tab-panel-solo" id="tab-${tabs[0].id}">
+    ${tabs[0].content}
+  </div>`;
+  }
+
+  const bar = tabs
+    .map(
+      (t, i) =>
+        `<button class="tab-btn${i === 0 ? " active" : ""}" role="tab" aria-selected="${i === 0}" aria-controls="tab-${t.id}" data-tab="${t.id}">${t.label}</button>`,
+    )
+    .join("\n    ");
+
+  const panels = tabs
+    .map(
+      (t, i) =>
+        `<div class="tab-panel${i === 0 ? "" : " hidden"}" id="tab-${t.id}">
+    ${t.content}
+  </div>`,
+    )
+    .join("\n  ");
+
+  return `<div class="tab-bar" role="tablist">
+    ${bar}
+  </div>
+
+  ${panels}`;
+}
+
+/** True if any platform has at least one token in any category. */
+function hasAnyTokens(tokens) {
+  return Object.values(tokens).some(
+    (t) =>
+      t &&
+      (t.colors.length > 0 ||
+        t.typography.length > 0 ||
+        t.spacing.length > 0),
+  );
+}
+
+/**
+ * Render the Style tokens tab: one block per platform, each split into colors,
+ * type scale, and spacing scale.
+ */
+function renderTokens(tokens, platformOrder) {
+  const blocks = platformOrder
+    .filter((p) => tokens[p])
+    .map((p) => {
+      const t = tokens[p];
+      return `<section class="token-platform">
+      <h2 class="token-platform-title">${PLATFORM_LABELS[p] || esc(p)}</h2>
+      ${renderColorTokens(t.colors)}
+      ${renderTypeTokens(t.typography)}
+      ${renderSpacingTokens(t.spacing)}
+    </section>`;
+    })
+    .join("\n    ");
+
+  return `<div class="tokens">
+    ${blocks}
+  </div>`;
+}
+
+function renderColorTokens(colors) {
+  if (!colors.length) return "";
+  const chips = colors
+    .map((c) => {
+      const v = c.value || {};
+      const light = v.light || null;
+      const dark = v.dark || null;
+      const swatch = light
+        ? dark && dark !== light
+          ? `<span class="swatch" style="background:linear-gradient(135deg, ${light} 0 50%, ${dark} 50% 100%)" title="light ${light} · dark ${dark}"></span>`
+          : `<span class="swatch" style="background:${light}" title="${light}"></span>`
+        : `<span class="swatch swatch-none" title="unresolved">?</span>`;
+      const hexLabel = light
+        ? dark && dark !== light
+          ? `${light} / ${dark}`
+          : light
+        : "—";
+      const aliasNote =
+        c.aliases && c.aliases.length
+          ? ` <span class="token-alias" title="${esc(c.aliases.join(", "))}">+${c.aliases.length}</span>`
+          : "";
+      return `<div class="color-chip" title="${esc(locationSummary(c.locations))}">
+        ${swatch}
+        <div class="color-meta">
+          <span class="color-name">${esc(c.display)}${aliasNote}</span>
+          <span class="color-hex">${esc(hexLabel)}</span>
+        </div>
+        <span class="token-count">${c.count}</span>
+      </div>`;
+    })
+    .join("\n      ");
+
+  return `<div class="token-group">
+      <h3 class="token-group-title">Colors <span class="token-group-count">${colors.length}</span></h3>
+      <div class="color-grid">
+      ${chips}
+      </div>
+    </div>`;
+}
+
+function renderTypeTokens(typography) {
+  if (!typography.length) return "";
+  const rows = typography
+    .map((t) => {
+      // Clamp the preview to a sensible range so a 64pt token doesn't dominate.
+      const previewPx = t.size
+        ? Math.max(11, Math.min(34, t.size))
+        : 15;
+      const sizeLabel = t.size != null ? `${t.size}` : "—";
+      return `<div class="type-row" title="${esc(locationSummary(t.locations))}">
+        <span class="type-size">${sizeLabel}</span>
+        <span class="type-preview" style="font-size:${previewPx}px;font-weight:${t.weight === "bold" || t.weight === "semibold" ? 600 : 400}">${esc(t.display)}</span>
+        <span class="type-kind">${t.kind}</span>
+        <span class="token-count">${t.count}</span>
+      </div>`;
+    })
+    .join("\n      ");
+
+  return `<div class="token-group">
+      <h3 class="token-group-title">Type scale <span class="token-group-count">${typography.length}</span></h3>
+      <div class="type-list">
+      ${rows}
+      </div>
+    </div>`;
+}
+
+function renderSpacingTokens(spacing) {
+  if (!spacing.length) return "";
+  const maxValue = spacing.reduce((m, s) => Math.max(m, s.value), 0) || 1;
+  const rows = spacing
+    .map((s) => {
+      const widthPct = Math.max(2, (s.value / maxValue) * 100);
+      return `<div class="space-row" title="${esc(s.contexts.join(", "))} · ${esc(locationSummary(s.locations))}">
+        <span class="space-value">${s.value}<span class="space-unit">${esc(s.unit)}</span></span>
+        <span class="space-bar-track"><span class="space-bar" style="width:${widthPct}%"></span></span>
+        <span class="token-count">${s.count}</span>
+      </div>`;
+    })
+    .join("\n      ");
+
+  return `<div class="token-group">
+      <h3 class="token-group-title">Spacing scale <span class="token-group-count">${spacing.length}</span></h3>
+      <div class="space-list">
+      ${rows}
+      </div>
+    </div>`;
+}
+
+/** Short human summary of where a token appears, for hover tooltips. */
+function locationSummary(locations) {
+  if (!locations || !locations.length) return "";
+  const files = [...new Set(locations.map((l) => l.relativePath))];
+  const shown = files.slice(0, 3).join(", ");
+  const more = files.length > 3 ? ` +${files.length - 3} more` : "";
+  return `${files.length} file${files.length !== 1 ? "s" : ""}: ${shown}${more}`;
+}
 
 function renderAlignment(alignment, platformOrder) {
   const matched = alignment.filter((a) => a.status === "matched");
@@ -540,6 +709,72 @@ select {
   .badge-drift { background: #422006; color: #fbbf24; }
   .badge-aligned { background: #052e16; color: #4ade80; }
 }
+
+/* --- Style tokens tab --- */
+.tokens { display: flex; flex-direction: column; gap: 2rem; }
+.token-platform-title {
+  font-size: 1rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-secondary); margin-bottom: 1rem;
+  padding-bottom: 0.4rem; border-bottom: 1px solid var(--border);
+}
+.token-group { margin-bottom: 1.5rem; }
+.token-group:last-child { margin-bottom: 0; }
+.token-group-title {
+  font-size: 0.8rem; font-weight: 600; color: var(--text); margin-bottom: 0.6rem;
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.token-group-count {
+  font-size: 0.7rem; font-weight: 600; color: var(--text-secondary);
+  background: var(--badge-bg); border-radius: 999px; padding: 0.05rem 0.45rem;
+}
+.token-count { font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+
+/* Colors */
+.color-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.5rem;
+}
+.color-chip {
+  display: flex; align-items: center; gap: 0.6rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+}
+.swatch {
+  width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+  border: 1px solid rgba(0,0,0,0.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+}
+.swatch-none {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--badge-bg); color: var(--text-secondary); font-size: 0.8rem; font-weight: 600;
+}
+.color-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.color-name { font-size: 0.78rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.color-hex { font-family: var(--mono); font-size: 0.68rem; color: var(--text-secondary); }
+.token-alias {
+  font-size: 0.62rem; font-weight: 600; color: var(--text-secondary);
+  background: var(--badge-bg); border-radius: 999px; padding: 0 0.3rem; vertical-align: middle;
+}
+
+/* Type scale */
+.type-list { display: flex; flex-direction: column; gap: 0.15rem; }
+.type-row {
+  display: grid; grid-template-columns: 2.5rem 1fr auto auto; align-items: baseline; gap: 0.75rem;
+  padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border);
+}
+.type-row:last-child { border-bottom: none; }
+.type-size { font-family: var(--mono); font-size: 0.78rem; color: var(--text-secondary); text-align: right; }
+.type-preview { color: var(--text); line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.type-kind { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+
+/* Spacing scale */
+.space-list { display: flex; flex-direction: column; gap: 0.2rem; }
+.space-row {
+  display: grid; grid-template-columns: 3.5rem 1fr auto; align-items: center; gap: 0.75rem;
+  padding: 0.25rem 0.6rem;
+}
+.space-value { font-family: var(--mono); font-size: 0.8rem; text-align: right; }
+.space-unit { color: var(--text-secondary); font-size: 0.65rem; margin-left: 1px; }
+.space-bar-track { background: var(--badge-bg); border-radius: 999px; height: 0.55rem; }
+.space-bar { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
 `;
 
 // ---------------------------------------------------------------------------
@@ -677,7 +912,59 @@ function renderMarkdown(catalogue) {
     lines.push("");
   }
 
+  if (catalogue.tokens && hasAnyTokens(catalogue.tokens)) {
+    lines.push("## Style tokens\n");
+    for (const p of platformOrder) {
+      const t = catalogue.tokens[p];
+      if (!t) continue;
+      lines.push(`### ${PLATFORM_LABELS[p] || p}\n`);
+      renderTokenMarkdown(lines, t);
+    }
+  }
+
   return lines.join("\n");
+}
+
+/** Append a platform's token tables (colors, type, spacing) to `lines`. */
+function renderTokenMarkdown(lines, tokens) {
+  if (tokens.colors.length) {
+    lines.push("**Colors**\n");
+    lines.push("| Color | Value | Kind | Count |");
+    lines.push("|-------|-------|------|-------|");
+    for (const c of tokens.colors) {
+      const v = c.value
+        ? c.value.dark && c.value.dark !== c.value.light
+          ? `${c.value.light} / ${c.value.dark}`
+          : c.value.light
+        : "—";
+      lines.push(`| \`${c.display}\` | ${v} | ${c.kind} | ${c.count} |`);
+    }
+    lines.push("");
+  }
+
+  if (tokens.typography.length) {
+    lines.push("**Type scale**\n");
+    lines.push("| Size | Token | Kind | Count |");
+    lines.push("|------|-------|------|-------|");
+    for (const t of tokens.typography) {
+      lines.push(
+        `| ${t.size != null ? t.size : "—"} | \`${t.display}\` | ${t.kind} | ${t.count} |`,
+      );
+    }
+    lines.push("");
+  }
+
+  if (tokens.spacing.length) {
+    lines.push("**Spacing scale**\n");
+    lines.push("| Value | Contexts | Count |");
+    lines.push("|-------|----------|-------|");
+    for (const s of tokens.spacing) {
+      lines.push(
+        `| ${s.value}${s.unit} | ${s.contexts.join(", ")} | ${s.count} |`,
+      );
+    }
+    lines.push("");
+  }
 }
 
 module.exports = { buildReport };
