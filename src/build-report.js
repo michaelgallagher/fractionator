@@ -61,6 +61,14 @@ function renderHtml(catalogue) {
 
   const hasAlignment = alignmentSection !== "";
 
+  const repoTags = platformOrder
+    .map((p) => {
+      const projectPath = platforms[p] && platforms[p].projectPath;
+      const repoName = projectPath ? path.basename(projectPath) : p;
+      return `<span class="repo-tag"><span class="repo-platform">${PLATFORM_LABELS[p] || p}</span><span class="repo-name">${esc(repoName)}</span></span>`;
+    })
+    .join("");
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -75,6 +83,7 @@ ${CSS}
 <div class="container">
   <header>
     <h1>Component catalogue</h1>
+    ${repoTags ? `<div class="repo-list">${repoTags}</div>` : ""}
   </header>
 
   ${
@@ -384,6 +393,10 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); line
 header { margin-bottom: 2rem; }
 h1 { font-size: 1.75rem; font-weight: 700; }
 .subtitle { color: var(--text-secondary); margin-top: 0.25rem; }
+.repo-list { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.6rem; }
+.repo-tag { display: inline-flex; align-items: center; gap: 0; font-size: 0.8rem; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.repo-platform { padding: 0.2rem 0.5rem; background: var(--accent-light); color: var(--accent); font-weight: 600; }
+.repo-name { padding: 0.2rem 0.6rem; background: var(--surface); color: var(--text-secondary); font-family: var(--mono); }
 
 .summary { margin-bottom: 2rem; }
 .summary h2 { font-size: 1rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; }
