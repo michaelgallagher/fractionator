@@ -327,25 +327,26 @@ function renderParam(p) {
 }
 
 function renderVariants(variants) {
-  const rows = variants
-    .map(
-      (v) => `<tr>
-        <td class="variant-label">${esc(v.label)}</td>
-        <td class="variant-count">${v.count}</td>
-        <td class="variant-screens">${[...new Set(v.usages.map((u) => u.enclosingView))].map((s) => `<span class="screen-tag">${esc(s)}</span>`).join(" ")}</td>
-      </tr>`,
-    )
+  const blocks = variants
+    .map((v) => {
+      const screens = [...new Set(v.usages.map((u) => u.enclosingView))];
+      const screenTags = screens.map((s) => `<span class="screen-tag">${esc(s)}</span>`).join(" ");
+      return `<div class="variant-block">
+          <div class="variant-header">
+            <span class="variant-label">${esc(v.label)}</span>
+            <span class="variant-count">×${v.count}</span>
+          </div>
+          ${screens.length > 0 ? `<div class="screen-list">${screenTags}</div>` : ""}
+        </div>`;
+    })
     .join("\n        ");
 
-  return `<div class="card-section">
-          <h4>Variants</h4>
-          <table class="variants-table">
-            <thead><tr><th>Style</th><th>Count</th><th>Screens</th></tr></thead>
-            <tbody>
-        ${rows}
-            </tbody>
-          </table>
-        </div>`;
+  return `<details class="card-section variants-expander">
+          <summary class="variants-summary">Variants <span class="variants-badge">${variants.length}</span></summary>
+          <div class="variant-list">
+        ${blocks}
+          </div>
+        </details>`;
 }
 
 function esc(str) {
@@ -482,11 +483,28 @@ select {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 999; cursor: pointer;
 }
 
-.variants-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
-.variants-table th { text-align: left; font-weight: 600; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
-.variants-table td { padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-.variant-label { font-family: var(--mono); font-size: 0.8rem; white-space: nowrap; }
-.variant-count { font-weight: 600; text-align: center; min-width: 3rem; }
+.variants-expander { border: none; }
+.variants-expander > .variant-list { margin-top: 0.5rem; }
+.variants-summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-secondary); user-select: none;
+}
+.variants-summary::-webkit-details-marker { display: none; }
+.variants-summary::before {
+  content: '▶'; font-size: 0.55rem; transition: transform 0.15s; color: var(--text-secondary);
+}
+.variants-expander[open] > .variants-summary::before { transform: rotate(90deg); }
+.variants-badge {
+  font-size: 0.7rem; padding: 0.05rem 0.4rem; border-radius: 999px;
+  background: var(--badge-bg); color: var(--badge-text); font-weight: 600; letter-spacing: 0;
+}
+.variant-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.variant-block { padding: 0.4rem 0.6rem; background: var(--variant-bg); border: 1px solid var(--border); border-radius: 6px; }
+.variant-header { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; margin-bottom: 0.25rem; }
+.variant-header:last-child { margin-bottom: 0; }
+.variant-label { font-family: var(--mono); font-size: 0.8rem; word-break: break-all; }
+.variant-count { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 
 .component-card.hidden { display: none; }
 
