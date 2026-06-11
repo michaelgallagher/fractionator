@@ -1,4 +1,4 @@
-const { execSync, spawnSync } = require("child_process");
+const { execSync, spawnSync, spawn } = require("child_process");
 const { globSync } = require("glob");
 const path = require("path");
 const fs = require("fs");
@@ -71,13 +71,11 @@ async function captureAndroidScreenshots(
   const gallerySource = generateGalleryActivity(previews, namespace);
   const galleryPath = path.join(mainSourceDir, "FractionatorGalleryActivity.kt");
 
-  // 4. Find emulator
-  const emulator = findEmulator();
+  // 4. Find or boot emulator
+  const emulator = await findOrStartEmulator();
   if (!emulator) {
-    console.log("   No Android emulator found — skipping screenshots");
-    console.log(
-      "   Start an emulator with: emulator -avd <name> (or from Android Studio)",
-    );
+    console.log("   No Android emulator found and no AVDs available — skipping screenshots");
+    console.log("   Create an AVD in Android Studio, then re-run");
     return new Map();
   }
   console.log(`   Emulator: ${emulator}`);
@@ -680,6 +678,66 @@ function ensureAndroidHome() {
     process.env.ANDROID_HOME = candidate;
     console.log(`   Using detected Android SDK: ${candidate}`);
     return candidate;
+  }
+
+  return null;
+}
+
+/**
+ * Find a running emulator, or boot the first available AVD if none is running.
+ * Returns the device serial or null if nothing is available.
+ */
+async function findOrStartEmulator() {
+  const running = findEmulator();
+  if (running) return running;
+
+  const androidHome = process.env.ANDROID_HOME;
+  if (!androidHome) return null;
+
+  const emulatorBin = path.join(androidHome, "emulator", "emulator");
+  if (!fs.existsSync(emulatorBin)) return null;
+
+  let avds;
+  try {
+    const out = execSync(`"${emulatorBin}" -list-avds`, {
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    avds = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+
+  if (avds.length === 0) return null;
+
+  const avd = avds[0];
+  console.log(`   No running emulator — booting AVD: ${avd}`);
+
+  spawn(
+    emulatorBin,
+    ["-avd", avd, "-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot-save"],
+    { detached: true, stdio: "ignore" },
+  ).unref();
+
+  // Poll for the emulator to appear and fully boot (up to 2 min)
+  const deadline = Date.now() + 120_000;
+  let serial = null;
+  while (Date.now() < deadline) {
+    await sleep(3_000);
+    serial = findEmulator();
+    if (!serial) continue;
+    try {
+      const booted = execSync(`adb -s ${serial} shell getprop sys.boot_completed`, {
+        encoding: "utf-8",
+        timeout: 5_000,
+      }).trim();
+      if (booted === "1") {
+        console.log(`   Emulator ready (${serial})`);
+        return serial;
+      }
+    } catch {
+      // still booting
+    }
   }
 
   return null;
