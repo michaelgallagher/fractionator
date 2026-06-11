@@ -61,6 +61,11 @@ function renderHtml(catalogue) {
 
   const hasAlignment = alignmentSection !== "";
 
+  const generatedAt = new Date().toLocaleString(undefined, {
+    dateStyle: "long",
+    timeStyle: "short",
+  });
+
   const repoTags = platformOrder
     .map((p) => {
       const projectPath = platforms[p] && platforms[p].projectPath;
@@ -84,6 +89,7 @@ ${CSS}
   <header>
     <h1>Component catalogue</h1>
     ${repoTags ? `<div class="repo-list">${repoTags}</div>` : ""}
+    <p class="generated-at">Generated ${esc(generatedAt)}</p>
   </header>
 
   ${
@@ -397,6 +403,7 @@ h1 { font-size: 1.75rem; font-weight: 700; }
 .repo-tag { display: inline-flex; align-items: center; gap: 0; font-size: 0.8rem; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .repo-platform { padding: 0.2rem 0.5rem; background: var(--accent-light); color: var(--accent); font-weight: 600; }
 .repo-name { padding: 0.2rem 0.6rem; background: var(--surface); color: var(--text-secondary); font-family: var(--mono); }
+.generated-at { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.35rem; }
 
 .summary { margin-bottom: 2rem; }
 .summary h2 { font-size: 1rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; }
