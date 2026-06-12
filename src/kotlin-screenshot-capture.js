@@ -118,7 +118,7 @@ async function captureAndroidScreenshots(
       // Extract just the error lines for a cleaner message
       const errorLines = out
         .split("\n")
-        .filter((l) => /\bERROR\b|error:/i.test(l))
+        .filter((l) => /\bERROR\b|error:|^e: /i.test(l))
         .slice(0, 20)
         .join("\n");
       throw new Error(
@@ -131,6 +131,16 @@ async function captureAndroidScreenshots(
     const apkPath = findBuiltApk(appModule);
     adb(emulator, ["install", "-r", apkPath]);
     console.log(`   APK installed (${applicationId})`);
+
+    // Component-only capture pulls the gallery's rendered PNGs from the app's
+    // private files via `run-as`, which works for debuggable (debug) builds.
+    // Probe once; if it's unavailable, fall back to full-screen captures.
+    const componentCapture = canRunAs(emulator, applicationId);
+    console.log(
+      componentCapture
+        ? "   Component-only capture enabled"
+        : "   run-as unavailable — using full-screen captures",
+    );
 
     // 7. Screenshot loop. Display-trait modes are the outer loop: each mode is
     // applied once as a global override (no rebuild). Changing font scale or
@@ -172,6 +182,14 @@ async function captureAndroidScreenshots(
           await warmUp(emulator, activityComponent, coldStartMs);
         }
 
+        const filename = screenshotFilename(sanitize(preview.id), modeId);
+        const destFile = path.join(screenshotsDir, filename);
+
+        // Clear any stale rendered files so their presence reflects this launch.
+        if (componentCapture) {
+          clearRendered(emulator, applicationId, preview.id);
+        }
+
         // Launch gallery activity with preview ID (warm recomposition)
         const launchResult = launchGallery(
           emulator,
@@ -186,44 +204,63 @@ async function captureAndroidScreenshots(
           continue;
         }
 
-        // Wait for the warm recomposition to render, then capture.
-        await sleep(settleMs);
-
-        // Capture screenshot via adb
-        const filename = screenshotFilename(sanitize(preview.id), modeId);
-        const destFile = path.join(screenshotsDir, filename);
-
-        try {
-          const pngData = spawnSync(
-            "adb",
-            ["-s", emulator, "exec-out", "screencap", "-p"],
-            { timeout: 10_000, maxBuffer: 20 * 1024 * 1024 },
+        // Prefer the gallery's component-only render (pulled via run-as); fall
+        // back to a full-screen screencap when there's no rendered image.
+        let cropped = false;
+        if (componentCapture) {
+          const done = await waitForMarker(
+            emulator,
+            applicationId,
+            preview.id,
+            settleMs + 6000,
+            250,
           );
-
-          if (
-            pngData.status === 0 &&
-            pngData.stdout &&
-            pngData.stdout.length > 0
-          ) {
-            fs.writeFileSync(destFile, pngData.stdout);
-            const existing = screenshotMap.get(preview.componentName) || [];
-            existing.push({
-              path: `screenshots/${filename}`,
-              previewName: preview.previewName,
-              id: preview.id,
-              mode: modeId,
-              modeLabel: mode.label,
-            });
-            screenshotMap.set(preview.componentName, existing);
-            captured++;
-          } else {
-            console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+          if (done && pullRendered(emulator, applicationId, preview.id, destFile)) {
+            cropped = true;
+          } else if (!done) {
+            await sleep(settleMs);
           }
-        } catch (err) {
-          console.warn(
-            `   ⚠️  Screenshot error for ${preview.id} [${modeId}]: ${err.message}`,
-          );
+        } else {
+          // Wait for the warm recomposition to render, then capture.
+          await sleep(settleMs);
         }
+
+        if (!cropped) {
+          try {
+            const pngData = spawnSync(
+              "adb",
+              ["-s", emulator, "exec-out", "screencap", "-p"],
+              { timeout: 10_000, maxBuffer: 20 * 1024 * 1024 },
+            );
+            if (
+              pngData.status === 0 &&
+              pngData.stdout &&
+              pngData.stdout.length > 0
+            ) {
+              fs.writeFileSync(destFile, pngData.stdout);
+            } else {
+              console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+              continue;
+            }
+          } catch (err) {
+            console.warn(
+              `   ⚠️  Screenshot error for ${preview.id} [${modeId}]: ${err.message}`,
+            );
+            continue;
+          }
+        }
+
+        const existing = screenshotMap.get(preview.componentName) || [];
+        existing.push({
+          path: `screenshots/${filename}`,
+          previewName: preview.previewName,
+          id: preview.id,
+          mode: modeId,
+          modeLabel: mode.label,
+          cropped,
+        });
+        screenshotMap.set(preview.componentName, existing);
+        captured++;
       }
     }
 
@@ -430,8 +467,19 @@ function extractPackageName(content) {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate FractionatorGalleryActivity.kt — an Activity that imports all
- * public @Preview functions and renders the selected one based on an intent extra.
+ * Generate FractionatorGalleryActivity.kt — an Activity that imports all public
+ * @Preview functions and renders the selected one based on an intent extra.
+ *
+ * The selected preview is both displayed (so the full-screen capture fallback
+ * still works) and recorded to a `GraphicsLayer`, which is converted to a
+ * component-sized PNG via `toImageBitmap()` — the Compose analog of iOS's
+ * `ImageRenderer`. The capture happens on an inner Box that wraps the component:
+ * the root `Box(fillMaxSize)` passes loose constraints down, so the inner Box
+ * sizes to the component's content (a button crops tight; a `fillMaxWidth`
+ * component gets screen width with content height; a full-screen layout gets the
+ * window, but without the system bars). The PNG and a completion marker are
+ * written to the app's internal `files/` dir, where the capture loop collects
+ * them via `run-as`.
  */
 function generateGalleryActivity(previews, targetPackage) {
   // Collect unique imports
@@ -454,14 +502,26 @@ function generateGalleryActivity(previews, targetPackage) {
 package ${targetPackage}
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import kotlinx.coroutines.delay
+import java.io.File
 ${importLines}
 
 class FractionatorGalleryActivity : ComponentActivity() {
@@ -474,7 +534,7 @@ class FractionatorGalleryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
         setContent {
-            FractionatorGalleryContent(previewId)
+            FractionatorGallery(previewId) { id, bitmap -> saveResult(id, bitmap) }
         }
     }
 
@@ -482,6 +542,58 @@ class FractionatorGalleryActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
+    }
+
+    // Write the component PNG (when one was produced) plus a marker that always
+    // signals completion, so the capture loop can fall back immediately rather
+    // than waiting out a timeout.
+    private fun saveResult(id: String, bitmap: Bitmap?) {
+        try {
+            if (bitmap != null) {
+                File(filesDir, "\$id.png").outputStream().use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            File(filesDir, "\$id.rendered").writeBytes(ByteArray(0))
+        } catch (_: Throwable) {
+        }
+    }
+}
+
+@Composable
+private fun FractionatorGallery(
+    previewId: String,
+    onResult: (String, Bitmap?) -> Unit,
+) {
+    val graphicsLayer = rememberGraphicsLayer()
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier.drawWithContent {
+                graphicsLayer.record { this@drawWithContent.drawContent() }
+                drawLayer(graphicsLayer)
+            }
+        ) {
+            FractionatorGalleryContent(previewId)
+        }
+    }
+
+    LaunchedEffect(previewId) {
+        // Skip the warm-up / empty ids — nothing to capture.
+        if (previewId.isEmpty() || previewId.startsWith("__fractionator")) {
+            return@LaunchedEffect
+        }
+        // Let the recomposition settle before recording the layer.
+        delay(500)
+        val bitmap = try {
+            graphicsLayer.toImageBitmap().asAndroidBitmap()
+        } catch (e: Throwable) {
+            Log.e("Fractionator", "capture failed for \$previewId", e)
+            null
+        }
+        onResult(previewId, bitmap)
     }
 }
 
@@ -811,6 +923,102 @@ function isProcessAlive(device, applicationId) {
     { encoding: "utf-8", timeout: 10_000 },
   );
   return result.status === 0 && result.stdout.trim().length > 0;
+}
+
+/**
+ * Whether `run-as <appId>` works on this device — true for debuggable (debug)
+ * builds, which lets us read the gallery's rendered PNGs from the app's private
+ * `files/` directory. Probed once; gates component-only capture.
+ */
+function canRunAs(device, appId) {
+  const res = spawnSync(
+    "adb",
+    ["-s", device, "exec-out", "run-as", appId, "ls"],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+  // `adb exec-out` doesn't propagate the remote exit code, so don't trust
+  // res.status: a working run-as lists the app home dir (non-empty stdout); a
+  // broken one ("unknown package") writes to stderr, leaving stdout empty.
+  return !!res.stdout && res.stdout.trim().length > 0;
+}
+
+/** Delete a preview's stale rendered PNG and completion marker. */
+function clearRendered(device, appId, id) {
+  spawnSync(
+    "adb",
+    [
+      "-s",
+      device,
+      "exec-out",
+      "run-as",
+      appId,
+      "rm",
+      "-f",
+      `files/${id}.png`,
+      `files/${id}.rendered`,
+    ],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+}
+
+/** Whether the gallery's completion marker for a preview exists yet. */
+function markerExists(device, appId, id) {
+  // List the whole files/ dir and look for an exact entry. `ls <missing-file>`
+  // can't be used: through `adb exec-out` it exits 0 and prints its "No such
+  // file" error (which contains the filename) to stdout, so any per-file check
+  // false-matches. A directory listing has no such error text.
+  const res = spawnSync(
+    "adb",
+    ["-s", device, "exec-out", "run-as", appId, "ls", "files"],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+  if (!res.stdout) return false;
+  return res.stdout.split(/\s+/).includes(`${id}.rendered`);
+}
+
+/** Poll for the completion marker up to a timeout. */
+async function waitForMarker(device, appId, id, timeoutMs, intervalMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (markerExists(device, appId, id)) return true;
+    await sleep(intervalMs);
+  }
+  return markerExists(device, appId, id);
+}
+
+/**
+ * Copy the gallery's rendered component PNG out of the app's private files via
+ * `run-as` (binary-clean through `exec-out`). Returns true if one was written.
+ */
+function pullRendered(device, appId, id, destFile) {
+  const res = spawnSync(
+    "adb",
+    ["-s", device, "exec-out", "run-as", appId, "cat", `files/${id}.png`],
+    { timeout: 15_000, maxBuffer: 64 * 1024 * 1024 },
+  );
+  // Validate the PNG signature — `cat` of a missing file (or any error) prints
+  // text to stdout that adb doesn't distinguish from a real payload, so a
+  // length check alone would write garbage and report success.
+  const out = res.stdout;
+  if (res.status === 0 && out && out.length > 8 && isPng(out)) {
+    fs.writeFileSync(destFile, out);
+    return true;
+  }
+  return false;
+}
+
+/** Whether a Buffer starts with the 8-byte PNG signature. */
+function isPng(buf) {
+  return (
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  );
 }
 
 /**
