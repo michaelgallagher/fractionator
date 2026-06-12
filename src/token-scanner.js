@@ -86,6 +86,9 @@ function matcher(regex, map) {
   };
 }
 
+// Compose text metrics measured in `.sp` that are not font sizes.
+const SP_NON_SIZE = new Set(["letterSpacing", "lineHeight"]);
+
 // SwiftUI system text styles (semantic type tokens).
 const SWIFT_TEXT_STYLES = [
   "largeTitle",
@@ -254,12 +257,16 @@ function androidTokenSpec(stripComments) {
       })),
     ],
     typography: [
-      // Explicit size: fontSize = 16.sp  /  16.sp
-      matcher(/\b(\d+(?:\.\d+)?)\.sp\b/g, (m) => {
-        const size = parseFloat(m[1]);
+      // Explicit size: `fontSize = 16.sp` or a bare `16.sp`. `.sp` is text-only,
+      // so the only non-size uses are letterSpacing and lineHeight — skip those
+      // (otherwise sub-1pt letter spacing pollutes the type scale).
+      matcher(/\b(?:(\w+)\s*=\s*)?(\d+(?:\.\d+)?)\.sp\b/g, (m) => {
+        const keyword = m[1];
+        if (keyword && SP_NON_SIZE.has(keyword)) return null;
+        const size = parseFloat(m[2]);
         return {
           key: `sp-${size}`,
-          display: `${m[1]}.sp`,
+          display: `${m[2]}.sp`,
           kind: "explicit",
           size,
         };

@@ -97,6 +97,15 @@ test("Android: colorScheme reference is semantic", () => {
   assert.strictEqual(hits[0].kind, "semantic");
 });
 
+test("Android: sp matcher skips letterSpacing and lineHeight", () => {
+  const spec = androidTokenSpec(noStrip);
+  assert.deepStrictEqual(run(spec, "typography", "letterSpacing = 0.025.sp,"), []);
+  assert.deepStrictEqual(run(spec, "typography", "lineHeight = 24.sp,"), []);
+  // Real font sizes still captured, with or without the keyword.
+  assert.strictEqual(run(spec, "typography", "fontSize = 16.sp,")[0].size, 16);
+  assert.strictEqual(run(spec, "typography", "Text(x, 18.sp)")[0].size, 18);
+});
+
 test("Android: sp typography and dp spacing", () => {
   const spec = androidTokenSpec(noStrip);
   const type = run(spec, "typography", "fontSize = 16.sp,");
