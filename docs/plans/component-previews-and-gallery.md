@@ -56,6 +56,27 @@ images, `UIViewRepresentable`, etc.). When the render fails or produces a
 zero-size image, fall back to the current full-screen capture so we never lose a
 preview we capture today.
 
+**Proposed-width retry (mitigated, additive).** With an *unspecified* proposed
+size, `.frame(maxWidth: .infinity)` views resolve to their content's ideal width
+and render fine — but some width-greedy previews (e.g. `PageHeading` hosted at
+full width) return `nil` on the first pass. Rather than propose a width for every
+render — which would constrain/reflow the crops that already work and could
+reintroduce horizontal whitespace — propose a width **only as a retry when the
+ideal-size render returns `nil`**:
+
+1. Render with unspecified size. Got an image? Use it — the existing good crops
+   are untouched, byte-for-byte.
+2. `nil`? Retry with `proposedSize = ProposedViewSize(width: W, height: nil)`
+   (W ≈ a phone content width). Recovers width-greedy fallbacks.
+3. Still `nil`? Full-screen fallback, as today.
+
+This is purely additive: nothing that currently crops can regress, because the
+retry only ever runs on a preview that was already going to fall back.
+`List`/`Form`/`TabView` previews have unbounded *height*, so the width retry
+won't rescue them — they correctly stay full-screen. (Validate empirically that
+the retry doesn't turn a clean full-screen `List` capture into a degenerate
+partial render; if it does, only accept the retried image when it looks sane.)
+
 ### Android (parity, after iOS proves out)
 
 The Compose analog: render the preview into a `ComposeView`, draw it to a bitmap

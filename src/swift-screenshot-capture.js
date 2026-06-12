@@ -152,6 +152,24 @@ async function captureComponentScreenshots(
       "0",
     ]);
 
+    // Locate the app's data container so we can collect the component-sized PNGs
+    // the gallery writes to Documents. If this fails we fall back to full-screen
+    // captures for every preview.
+    let dataContainer = null;
+    try {
+      dataContainer = run("xcrun", [
+        "simctl",
+        "get_app_container",
+        simulator.udid,
+        bundleId,
+        "data",
+      ]).trim();
+    } catch (err) {
+      console.warn(
+        `   ⚠️  Could not locate app data container (${err.message}); using full-screen captures`,
+      );
+    }
+
     // 6. Screenshot loop. Display-trait modes are the outer loop: each mode is
     // applied once as a global override (no rebuild), then every preview is
     // captured under it. Baseline trait values are snapshotted first so the
@@ -174,6 +192,7 @@ async function captureComponentScreenshots(
         const ok = await captureOneIosPreview(
           simulator.udid,
           bundleId,
+          dataContainer,
           preview,
           modeId,
           screenshotsDir,
@@ -215,12 +234,20 @@ async function captureComponentScreenshots(
 
 /**
  * Capture a single preview under the already-applied display mode.
- * Terminates any running instance, launches the gallery on the preview id,
- * settles, screenshots, and records the result. Returns true on success.
+ *
+ * Prefers the component-sized PNG the gallery renders via `ImageRenderer` (pulled
+ * from the app's Documents directory); falls back to a full-screen `simctl io`
+ * capture when no rendered image appears — e.g. previews `ImageRenderer` can't
+ * render (sheets, async content) or runtimes earlier than iOS 16.
+ *
+ * Terminates any running instance, clears any stale rendered file, launches the
+ * gallery on the preview id, settles, collects the result, and records it.
+ * Returns true on success.
  */
 async function captureOneIosPreview(
   udid,
   bundleId,
+  dataContainer,
   preview,
   modeId,
   screenshotsDir,
@@ -231,6 +258,25 @@ async function captureOneIosPreview(
   spawnSync("xcrun", ["simctl", "terminate", udid, bundleId], {
     encoding: "utf-8",
   });
+
+  // The gallery writes `<id>.png` (the component image, if it rendered) and
+  // always `<id>.rendered` (a completion marker) into Documents. Clear any stale
+  // copies first so their presence unambiguously reflects this launch.
+  const renderedSrc = dataContainer
+    ? path.join(dataContainer, "Documents", `${preview.id}.png`)
+    : null;
+  const markerSrc = dataContainer
+    ? path.join(dataContainer, "Documents", `${preview.id}.rendered`)
+    : null;
+  for (const stale of [renderedSrc, markerSrc]) {
+    if (stale && fs.existsSync(stale)) {
+      try {
+        fs.unlinkSync(stale);
+      } catch {
+        // non-fatal
+      }
+    }
+  }
 
   // Launch with gallery arg
   const launchResult = spawnSync(
@@ -246,37 +292,65 @@ async function captureOneIosPreview(
     return false;
   }
 
-  // Settle
-  await sleep(settleMs);
-
-  // Capture
+  // Wait for the gallery to finish (the marker), polling rather than assuming a
+  // fixed delay — cold-start time varies. Once the marker appears, the render
+  // attempt is complete, so we can decide immediately. If it never appears (no
+  // data container, or pre-iOS 16), settle and fall back to a screenshot.
   const filename = screenshotFilename(sanitize(preview.id), modeId);
   const destFile = path.join(screenshotsDir, filename);
-  const shotResult = spawnSync(
-    "xcrun",
-    ["simctl", "io", udid, "screenshot", destFile],
-    { encoding: "utf-8", timeout: 10_000 },
-  );
 
-  if (
-    shotResult.status === 0 &&
-    fs.existsSync(destFile) &&
-    fs.statSync(destFile).size > 0
-  ) {
-    const existing = screenshotMap.get(preview.componentName) || [];
-    existing.push({
-      path: `screenshots/${filename}`,
-      previewName: preview.previewName,
-      id: preview.id,
-      mode: modeId,
-      modeLabel: MODES[modeId].label,
-    });
-    screenshotMap.set(preview.componentName, existing);
-    return true;
+  const done = markerSrc
+    ? await waitForFile(markerSrc, settleMs + 5000, 150)
+    : false;
+  if (!done) {
+    await sleep(settleMs);
   }
 
-  console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
-  return false;
+  // Prefer the component-only image the gallery rendered.
+  let cropped = false;
+  if (
+    renderedSrc &&
+    fs.existsSync(renderedSrc) &&
+    fs.statSync(renderedSrc).size > 0
+  ) {
+    try {
+      fs.copyFileSync(renderedSrc, destFile);
+      cropped = true;
+    } catch {
+      // fall through to full-screen capture
+    }
+  }
+
+  // Fall back to a full-screen capture of the displayed preview.
+  if (!cropped) {
+    const shotResult = spawnSync(
+      "xcrun",
+      ["simctl", "io", udid, "screenshot", destFile],
+      { encoding: "utf-8", timeout: 10_000 },
+    );
+    if (
+      !(
+        shotResult.status === 0 &&
+        fs.existsSync(destFile) &&
+        fs.statSync(destFile).size > 0
+      )
+    ) {
+      console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+      return false;
+    }
+  }
+
+  const existing = screenshotMap.get(preview.componentName) || [];
+  existing.push({
+    path: `screenshots/${filename}`,
+    previewName: preview.previewName,
+    id: preview.id,
+    mode: modeId,
+    modeLabel: MODES[modeId].label,
+    cropped,
+  });
+  screenshotMap.set(preview.componentName, existing);
+  return true;
 }
 
 /**
@@ -437,6 +511,14 @@ function collectPrivateTypes(content) {
 /**
  * Generate FractionatorGallery.swift — a single file containing all preview
  * bodies as cases in a switch, selectable via launch argument.
+ *
+ * The selected preview is both displayed (so the full-screen capture fallback
+ * still works) and rendered to a component-sized PNG via `ImageRenderer`, which
+ * sizes to the view's intrinsic content — no device chrome, no whitespace. The
+ * render honours the live colour scheme and Dynamic Type size so mode variations
+ * (dark, type) are reproduced; `ImageRenderer` otherwise renders in a detached,
+ * default environment. The PNG is written to the app's Documents directory under
+ * the preview id, where the capture loop collects it.
  */
 function generateGallerySource(previews) {
   const cases = previews
@@ -450,16 +532,69 @@ function generateGallerySource(previews) {
 
   return `${SENTINEL}
 import SwiftUI
+import UIKit
 
 struct FractionatorGallery: View {
     let previewId: String
+    @Environment(\\.displayScale) private var displayScale
+    @Environment(\\.colorScheme) private var colorScheme
+    @Environment(\\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        switch previewId {
+        previewContent(previewId)
+            .task {
+                // Let the view settle (async loads, layout) before rendering.
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                renderToFile(previewId)
+                // Always signal completion — present whether or not a PNG was
+                // produced — so the capture loop can fall back immediately
+                // instead of waiting out a timeout.
+                writeMarker(previewId)
+            }
+    }
+
+    @ViewBuilder
+    private func previewContent(_ id: String) -> some View {
+        switch id {
 ${cases}
         default:
-            AnyView(Text("Unknown preview: \\(previewId)"))
+            AnyView(Text("Unknown preview: \\(id)"))
         }
+    }
+
+    @MainActor
+    private func renderToFile(_ id: String) {
+        guard #available(iOS 16.0, *) else { return }
+        let content = previewContent(id)
+            .environment(\\.colorScheme, colorScheme)
+            .environment(\\.dynamicTypeSize, dynamicTypeSize)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = displayScale
+
+        // First pass: let the view size to its own ideal dimensions, so
+        // tightly-sized components stay tightly cropped.
+        var image = renderer.uiImage
+        // Retry, only on failure: propose a phone-width so width-greedy views
+        // (.frame(maxWidth: .infinity)) can resolve. Additive — this never runs
+        // for a preview the ideal-size pass already rendered.
+        if image == nil {
+            renderer.proposedSize = ProposedViewSize(width: 390, height: nil)
+            image = renderer.uiImage
+        }
+
+        guard let image,
+              let data = image.pngData(),
+              let docs = FileManager.default.urls(
+                  for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        try? data.write(to: docs.appendingPathComponent(id + ".png"))
+    }
+
+    private func writeMarker(_ id: String) {
+        guard let docs = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        try? Data().write(to: docs.appendingPathComponent(id + ".rendered"))
     }
 }
 `;
@@ -604,6 +739,20 @@ function findSourceDir(projectPath) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll for a file to exist, up to a timeout. Returns true once it appears.
+ * Used for the gallery's completion marker, which is written only after the
+ * component PNG, so its presence means any PNG is fully written.
+ */
+async function waitForFile(filePath, timeoutMs, intervalMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) return true;
+    await sleep(intervalMs);
+  }
+  return fs.existsSync(filePath);
 }
 
 function sanitize(id) {
