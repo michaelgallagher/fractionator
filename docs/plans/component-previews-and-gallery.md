@@ -109,9 +109,10 @@ we're in there.
 
 1. **iOS `ImageRenderer` capture** → component-only images. Foundation; unlocks
    everything else. Prototype against `nhsapp-ios-demo-v2` and compare a real
-   before/after thumbnail before committing to the gallery rework.
-2. **Gallery grid + List/Gallery toggle** → the density win.
-3. **Android component-only capture** → parity.
+   before/after thumbnail before committing further.
+2. **Android component-only capture** → parity, so the gallery is built against
+   component-sized thumbnails on both platforms.
+3. **Gallery grid + List/Gallery toggle** → the density win.
 4. **Token deep-linking + spacing outliers** → polish.
 
 ## Risks / edge cases
