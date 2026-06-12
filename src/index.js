@@ -28,6 +28,7 @@ const {
   buildIosColorResolver,
   buildAndroidColorResolver,
 } = require("./color-resolver");
+const { buildAndroidTypeResolver } = require("./type-resolver");
 const { buildTokenCatalogue } = require("./token-catalogue");
 
 /**
@@ -268,6 +269,7 @@ async function generate(options) {
     catalogue.tokens.android = buildTokenCatalogue(
       androidTokenOccurrences,
       buildAndroidColorResolver(sources.android),
+      buildAndroidTypeResolver(sources.android),
     );
     logTokenSummary(catalogue.tokens.android);
 

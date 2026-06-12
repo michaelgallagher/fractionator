@@ -23,15 +23,17 @@ const SEMANTIC_TYPE_SIZE = {
 /**
  * @param {Occurrence[]} occurrences - Flat list from scanTokens
  * @param {{resolve: Function}|null} colorResolver - Platform color resolver
+ * @param {{resolve: Function}|null} typeResolver - Resolves semantic type roles
+ *        (e.g. Compose `typography.bodyLarge`) to point sizes
  * @returns {{ colors: Token[], typography: Token[], spacing: Token[] }}
  */
-function buildTokenCatalogue(occurrences, colorResolver) {
+function buildTokenCatalogue(occurrences, colorResolver, typeResolver) {
   const byCategory = { colors: [], typography: [], spacing: [] };
   for (const o of occurrences) byCategory[o.category].push(o);
 
   return {
     colors: aggregateColors(byCategory.colors, colorResolver),
-    typography: aggregateTypography(byCategory.typography),
+    typography: aggregateTypography(byCategory.typography, typeResolver),
     spacing: aggregateSpacing(byCategory.spacing),
   };
 }
@@ -103,14 +105,20 @@ function mergeValue(a, b) {
 }
 
 /** Type tokens group by key; ordered as an ascending scale by point size. */
-function aggregateTypography(occurrences) {
+function aggregateTypography(occurrences, typeResolver) {
   const groups = new Map();
 
   for (const o of occurrences) {
     let g = groups.get(o.key);
     if (!g) {
+      // Size precedence: explicit (e.g. `.system(size:)`, `N.sp`) → iOS system
+      // style defaults → platform theme resolution (Compose Typography roles).
       const size =
-        o.size != null ? o.size : SEMANTIC_TYPE_SIZE[o.key] ?? null;
+        o.size != null
+          ? o.size
+          : SEMANTIC_TYPE_SIZE[o.key] ??
+            (typeResolver ? typeResolver.resolve(o.key) : null) ??
+            null;
       g = {
         key: o.key,
         display: o.display,
