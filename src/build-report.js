@@ -100,7 +100,7 @@ function renderHtml(catalogue) {
 ${CSS}
 </style>
 </head>
-<body>
+<body class="view-gallery">
 <div class="container">
   <header>
     <h1>Component catalogue</h1>
@@ -145,6 +145,10 @@ ${CSS}
           <option value="variants-desc">Most variants</option>
         </select>
       </label>
+      <div class="view-toggle" role="group" aria-label="View mode">
+        <button type="button" class="view-btn" data-view="gallery" aria-pressed="true">Gallery</button>
+        <button type="button" class="view-btn" data-view="list" aria-pressed="false">List</button>
+      </div>
     </section>
 
     <section class="components" id="components">
@@ -509,18 +513,18 @@ function renderComponentCard(comp, showcaseById = new Map()) {
 
   let previewSection;
   if (screenshots.length > 0) {
-    previewSection = `<div class="card-section">
+    previewSection = `<div class="card-section card-section-preview">
           <h4>Preview${screenshots.length > 1 ? "s" : ""}</h4>
           ${renderScreenshots(screenshots)}
           ${showcases.length ? renderShowcaseBacklink(showcases) : ""}
         </div>`;
   } else if (showcases.length > 0) {
-    previewSection = `<div class="card-section">
+    previewSection = `<div class="card-section card-section-preview">
           <h4>Preview${showcases.length > 1 ? "s" : ""}</h4>
           ${showcases.map((s) => renderShowcaseOnCard(s, comp.name)).join("\n          ")}
         </div>`;
   } else {
-    previewSection = `<div class="card-section">
+    previewSection = `<div class="card-section card-section-preview">
           <h4>Preview</h4>
           <p class="preview-missing preview-missing-${status.kind}">${esc(status.label)}</p>
         </div>`;
@@ -729,7 +733,12 @@ h1 { font-size: 1.75rem; font-weight: 700; }
 .stat-value { display: block; font-size: 1.5rem; font-weight: 700; color: var(--accent); }
 .stat-label { font-size: 0.8rem; color: var(--text-secondary); }
 
-.controls { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.controls {
+  display: flex; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 50;
+  padding: 0.75rem 0; background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
 #search {
   flex: 1; min-width: 200px; padding: 0.5rem 0.75rem; border: 1px solid var(--border);
   border-radius: 6px; font-size: 0.9rem; background: var(--surface); color: var(--text);
@@ -739,6 +748,15 @@ select {
   padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px;
   font-size: 0.9rem; background: var(--surface); color: var(--text);
 }
+
+.view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.view-btn {
+  background: var(--surface); border: none; cursor: pointer; font-family: var(--font);
+  font-size: 0.85rem; color: var(--text-secondary); padding: 0.5rem 0.85rem;
+}
+.view-btn + .view-btn { border-left: 1px solid var(--border); }
+.view-btn:hover { color: var(--text); }
+.view-btn[aria-pressed="true"] { background: var(--accent-light); color: var(--accent); font-weight: 600; }
 
 .component-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -838,6 +856,36 @@ select {
 .variant-count { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 
 .component-card.hidden { display: none; }
+
+/* --- Gallery view --- */
+body.view-gallery .container { max-width: 1400px; }
+body.view-gallery #components {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+body.view-gallery .component-card { margin-bottom: 0; }
+/* Compact tile: keep header + preview, drop the detail sections. */
+body.view-gallery .card-body > .card-section { display: none; }
+body.view-gallery .card-body > .card-section-preview { display: block; margin-bottom: 0; }
+body.view-gallery .card-section-preview h4 { display: none; }
+/* Lean badges: platform + usage only. */
+body.view-gallery .card-meta .badge-variants,
+body.view-gallery .card-meta .badge-no-preview,
+body.view-gallery .card-meta .badge-fallback,
+body.view-gallery .card-meta .badge-showcase { display: none; }
+/* One representative thumbnail per tile, so a component with many full-screen
+   fallback captures doesn't stack into a giant cell and break the grid. */
+body.view-gallery .card-section-preview .screenshot-figure:not(:first-child),
+body.view-gallery .card-section-preview .preview-group:not(:first-of-type),
+body.view-gallery .card-section-preview .showcase-on-card:not(:first-of-type) { display: none; }
+/* Letterbox thumbnails so a 126px glyph and a full-screen fallback both fit. */
+body.view-gallery .screenshot-strip { overflow: visible; }
+body.view-gallery .screenshot-img { max-height: 150px; }
+body.view-gallery .screenshot-figure figcaption,
+body.view-gallery .preview-group h5,
+body.view-gallery .showcase-note { display: none; }
 
 .tab-bar {
   display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem;
@@ -981,6 +1029,24 @@ const JS = `
 
   search.addEventListener('input', applyFilter);
   sort.addEventListener('change', applySort);
+
+  // Gallery / List view toggle (persisted)
+  const viewBtns = Array.from(document.querySelectorAll('.view-btn'));
+  function applyView(view) {
+    const v = view === 'list' ? 'list' : 'gallery';
+    document.body.classList.toggle('view-gallery', v === 'gallery');
+    document.body.classList.toggle('view-list', v === 'list');
+    for (const btn of viewBtns) {
+      btn.setAttribute('aria-pressed', String(btn.dataset.view === v));
+    }
+    try { localStorage.setItem('fractionator-view', v); } catch (e) {}
+  }
+  for (const btn of viewBtns) {
+    btn.addEventListener('click', function() { applyView(btn.dataset.view); });
+  }
+  let savedView = 'gallery';
+  try { savedView = localStorage.getItem('fractionator-view') || 'gallery'; } catch (e) {}
+  applyView(savedView);
 
   // Tab switching
   document.querySelectorAll('.tab-btn').forEach(function(btn) {
