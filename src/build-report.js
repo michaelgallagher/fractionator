@@ -631,6 +631,8 @@ function renderComponentCard(comp, showcaseById = new Map()) {
       </div>
       <div class="card-body">
         ${previewSection}
+        <details class="card-extra">
+        <summary class="card-extra-summary">Details</summary>
         <div class="card-section">
           <h4>File</h4>
           <code>${esc(comp.relativePath)}</code>
@@ -652,6 +654,7 @@ function renderComponentCard(comp, showcaseById = new Map()) {
             : `<div class="card-section"><p class="unused-note">Not used outside its definition file</p></div>`
         }
         ${variantCount > 1 ? renderVariants(comp.variants) : ""}
+        </details>
       </div>
     </article>`;
 }
@@ -921,6 +924,22 @@ select {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 999; cursor: pointer;
 }
 
+/* List view: secondary detail is collapsed by default behind a "Details"
+   expander, keeping the card scannable. The modal opens it for drill-in. */
+.card-extra { margin-top: 0.25rem; }
+.card-extra > .card-extra-summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-secondary); user-select: none;
+}
+.card-extra > .card-extra-summary::-webkit-details-marker { display: none; }
+.card-extra > .card-extra-summary::before {
+  content: '▶'; font-size: 0.55rem; transition: transform 0.15s; color: var(--text-secondary);
+}
+.card-extra[open] > .card-extra-summary::before { transform: rotate(90deg); }
+.card-extra[open] > .card-extra-summary { margin-bottom: 0.75rem; }
+.card-extra > .card-section:last-child { margin-bottom: 0; }
+
 .variants-expander { border: none; }
 .variants-expander > .variant-list { margin-top: 0.5rem; }
 .variants-summary {
@@ -971,7 +990,7 @@ body.view-gallery #components .platform-heading:first-child { margin-top: 0; }
 body.view-gallery #components .component-card { margin-bottom: 0; cursor: pointer; }
 body.view-gallery #components .component-card:hover { border-color: var(--accent); }
 /* Compact tile: keep header + preview, drop the detail sections. */
-body.view-gallery #components .card-body > .card-section { display: none; }
+body.view-gallery #components .card-extra { display: none; }
 body.view-gallery #components .card-body > .card-section-preview { display: block; margin-bottom: 0; }
 body.view-gallery #components .card-section-preview h4 { display: none; }
 /* Lean badges: platform + usage only. */
@@ -1011,6 +1030,9 @@ body.modal-open { overflow: hidden; }
 .detail-modal-content .component-card { margin: 0; border: none; }
 /* Keep the header pills clear of the close button (top-right). */
 .detail-modal-content .card-header { padding-right: 3rem; }
+/* The modal shows full detail (JS opens the expander), so drop its summary. */
+.detail-modal-content .card-extra-summary { display: none; }
+.detail-modal-content .card-extra[open] > .card-extra-summary { margin-bottom: 0; }
 
 .tab-bar {
   display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem;
@@ -1239,6 +1261,8 @@ const JS = `
     modalContent.innerHTML = '';
     const clone = card.cloneNode(true);
     clone.classList.remove('hidden');
+    // Drill-in shows everything: open the "Details" expander (and any nested ones).
+    clone.querySelectorAll('details').forEach((d) => { d.open = true; });
     modalContent.appendChild(clone);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
