@@ -42,7 +42,7 @@ async function generate(options) {
   const { sources, outputDir, formats, componentsDirOverride, includeUnused } =
     options;
 
-  console.log("🧬  Fractionator\n");
+  console.log("🧬 Fractionator\n");
 
   const catalogue = { platforms: {}, tokens: {} };
 
