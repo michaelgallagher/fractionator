@@ -19,8 +19,9 @@ Point Fractionator at one or more prototypes and it will:
   **showcases**.
 - **Catalogue style tokens** — the colours (light *and* dark hex), type sizes, and
   spacing units actually in use.
-- **Output a report** — a self-contained HTML page with filterable component cards,
-  a Showcases tab, and a Style tokens tab. Also JSON and Markdown.
+- **Output a report** — a self-contained HTML page: a filterable component gallery
+  (with a Gallery/List toggle and click-to-drill-in detail), a Showcases tab, and a
+  Style tokens tab. Also JSON and Markdown.
 
 ## Requirements
 
