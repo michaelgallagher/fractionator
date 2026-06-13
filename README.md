@@ -21,7 +21,8 @@ Point Fractionator at one or more prototypes and it will:
   spacing units actually in use.
 - **Output a report** — a self-contained HTML page: a filterable component gallery
   (with a Gallery/List toggle and click-to-drill-in detail), a Showcases tab, and a
-  Style tokens tab. Also JSON and Markdown.
+  Style tokens tab. Also JSON and Markdown. The HTML report is keyboard-accessible
+  and meets WCAG 2.2 AA — see [docs/a11y/](docs/a11y/A11Y.md).
 
 ## Requirements
 
