@@ -1,152 +1,104 @@
 # Writing previews that capture well
 
-Fractionator creates images of your components from their `#Preview` blocks. How you
-write those previews decides whether you get a clean, **component-only** image or
-a full **device-screen** screenshot — and, in some cases, whether the preview is
-captured at all. This guide explains what the tool does and how to author
-previews that capture well.
+Fractionator builds component images from the previews that already exist in your
+prototype — `#Preview` blocks on iOS, `@Preview @Composable` functions on Android.
+It injects a tiny gallery, renders each preview off-screen at the component's
+intrinsic size (falling back to a full-screen screenshot when it can't), and puts
+the result in the report.
 
-> Scope: this is about **iOS / SwiftUI** previews, where component-only capture is
-> implemented. Compose guidance is at the end and is forward-looking.
+How you write a preview decides whether you get a clean component-only image, a
+full-screen fallback, or no image at all. The report flags each gap — a component
+shows **no preview**, **preview skipped** (with the reason), **full-screen**, or
+**in showcase** — so it doubles as a punch-list. (For the mechanics, see
+[screenshot-capture.md](screenshot-capture.md).)
 
-## How capture works (the 30-second version)
+---
 
-For each `#Preview`, the tool:
+## iOS (SwiftUI)
 
-1. extracts the preview body and hosts it in a generated gallery inside your app;
-2. renders it with SwiftUI's `ImageRenderer`, which sizes the image to the view's
-   **intrinsic content** — no status bar, no home indicator, no whitespace;
-3. if that render can't produce an image, falls back to a **full-screen
-   screenshot** of the running app.
+### Do
+- **Give every reusable component a `#Preview`.** No `#Preview` → no image.
+- **Preview the component in isolation**, at its natural size:
+  ```swift
+  #Preview { MyButton(title: "Continue") {} }
+  ```
+- **Name multi-case previews:** `#Preview("Loading") { … }` — the name becomes the
+  caption.
+- **Simple `@Previewable @State` works** — Fractionator hoists single-line state
+  into a wrapper view:
+  ```swift
+  #Preview {
+      @Previewable @State var on = true
+      MyToggleRow(isOn: $on)
+  }
+  ```
 
-So the goal when authoring a preview is simple: **return a view that knows its own
-size.** A button, a card, a row, an icon — these size to their content and render
-as tight, chrome-free images. A whole screen does not.
+### Falls back to a full-screen shot
+- **Wrapping in a `ScrollView`** — `ImageRenderer` can't rasterise scroll-view
+  content (it renders blank), so Fractionator discards it and falls back. Use a
+  plain `VStack` (add a fixed `.frame` height only if you truly need scrolling).
+- **`UIViewRepresentable`, `AsyncImage`, other content needing a live environment.**
 
-## Do this — previews that crop cleanly
+### Skipped — no image
+- **Multi-statement bodies with a bare `return`** — keep the body a single view
+  expression.
+- **`private` / `fileprivate` types referenced in the preview** — the gallery is a
+  separate file. Make the type non-private.
+- **Previewing a whole screen** instead of the component.
 
-**Return the component directly**, optionally with a little padding:
+---
 
-```swift
-#Preview("Default") {
-    HelpSectionView()
-}
+## Android (Jetpack Compose)
 
-#Preview("Custom URL") {
-    HelpSectionView(url: URL(string: "https://www.nhs.uk/")!)
-}
-```
+### Do
+- **Give every component a `@Preview @Composable` function.**
+- **Make preview functions `public` or `internal` — not `private`.** The gallery
+  is a separate file in the *same module*: it can call `public`/`internal`, but a
+  top-level `private fun` is file-scoped and invisible.
+  ```kotlin
+  // ⚠️ skipped — file-private
+  @Preview @Composable private fun MyCardPreview() { MyCard(...) }
+  // ✅ capturable
+  @Preview @Composable fun MyCardPreview() { MyCard(...) }
+  ```
+- **Keep previews parameterless, or give every parameter a default.** The gallery
+  calls each preview as `fn()`, so a parameter with no default — including a
+  `@PreviewParameter` provider — makes it uncapturable:
+  ```kotlin
+  // ⚠️ skipped — gallery can't supply the argument
+  @Preview @Composable fun RowPreview(@PreviewParameter(P::class) s: State) { … }
+  // ✅ default makes fn() valid
+  @Preview @Composable fun RowPreview(current: Boolean = true) { … }
+  ```
+- **Name previews** with `@Preview(name = "Loading")` for a clear caption.
 
-**Show several variants stacked** — a `VStack` is self-sizing, so this still
-crops to just the stack:
+### Falls back to a full-screen shot
+- **`AndroidView`, `WebView`, maps, async images** — a `GraphicsLayer` can't record
+  this content, so the component render comes back blank and Fractionator falls
+  back to full-screen.
 
-```swift
-#Preview("Sizes") {
-    VStack(alignment: .leading, spacing: 20) {
-        PageHeading(title: "H1 Page title", level: .h1)
-        PageHeading(title: "H2 Page title (default)")
-        PageHeading(title: "H3 Section heading", level: .h3)
-    }
-    .padding()
-}
-```
+---
 
-**Give greedy components a width if they need one.** A component that uses
-`.frame(maxWidth: .infinity)` will size to its content's natural width; if you
-want it rendered at a specific width, wrap it in a fixed frame rather than a
-scrolling container:
+## Showcase previews (rendering several components)
 
-```swift
-#Preview {
-    NHSButton("Continue") {}
-        .frame(width: 360)
-        .padding()
-}
-```
+A preview that renders **two or more** components (e.g. a buttons gallery laying
+out filled/outlined/text buttons together) is treated as a **showcase**: it gets
+its own card in the Showcases tab with a chip per component, and each component it
+contains links to it. Fractionator detects this from the preview body, so you
+don't need to do anything special — a single "all buttons" preview sensibly covers
+every button component at once.
 
-## Avoid this — previews that fall back to a full screen
+---
 
-The tool **cannot** size these, so they're captured as full-screen screenshots.
-The component is still in the catalogue; the image is just the whole device.
+## The report is your punch-list
 
-| Wrapper | Why it can't be cropped |
-|---|---|
-| `List { … }` / `Form { … }` | Scrollable containers with **no intrinsic height** — they fill their scroll area, so there's no finite size to render. |
-| `NavigationStack { … }` / `NavigationView` | Screen-filling containers that own a navigation bar. |
-| `TabView { … }` | Full-screen by definition. |
-| `.toolbar { … }` | The component only exists in the nav-bar chrome, not in the content. |
+| Badge / note | Meaning | Fix |
+|---|---|---|
+| *(image shown)* | Captured as an isolated component | — |
+| **full-screen** | Captured, but only as a full-screen shot | Remove the scroll/representable wrapper |
+| **in showcase** | Captured as part of a multi-component showcase | — |
+| **preview skipped** + reason | A preview exists but couldn't be captured | Address the reason (interactive / multi-statement / private / parameterised) |
+| **no preview** | No `#Preview` / `@Preview` in the source | Add one |
 
-```swift
-// ❌ Falls back to full screen — the List can't be sized
-#Preview("Default") {
-    List {
-        NHSSection {
-            Text("Item 1")
-            Text("Item 2")
-        }
-    }
-}
-
-// ✅ Crops to just the component
-#Preview("Default") {
-    NHSSection {
-        Text("Item 1")
-        Text("Item 2")
-    }
-    .padding()
-}
-```
-
-If a component is **genuinely** a list row or a navigation-bar button, a
-full-screen capture is the honest representation and the fallback is fine — but if
-you want the component itself, add a **second, unwrapped preview** alongside the
-in-context one. Both are captured.
-
-## Make sure the preview is captured at all
-
-A few preview styles are **skipped entirely** (no image, cropped or otherwise),
-because the tool lifts the body out into a separate generated file:
-
-- **`@Previewable @State`** — preview-local state can't be lifted out. Move the
-  state into a small wrapper `View` and preview that instead.
-- **Bare `return` / multi-statement bodies** — keep the body a single returned
-  expression (use a wrapper view if you need setup).
-- **`private` / `fileprivate` types referenced in the body** — these are
-  invisible to the generated gallery. Give the preview access to non-private
-  types, or make a small internal preview helper.
-
-## Small things that improve the output
-
-- **Name your previews** — `#Preview("Empty state")` gives readable captions and
-  filenames; unnamed previews become `Default`, `Default_2`, …
-- **Light & dark are automatic** — the tool reproduces the active colour scheme
-  and Dynamic Type size, so you don't need separate light/dark previews just for
-  capture (though they're fine if you want both as distinct entries).
-- **Keep previews self-contained** — avoid network images or async loads in the
-  previewed view; `ImageRenderer` renders a single synchronous frame, so
-  not-yet-loaded content renders empty.
-
-## Project requirements
-
-Component-only capture needs:
-
-- the **SwiftUI App lifecycle** — a `@main … : App` with a `WindowGroup` scene
-  (the tool injects its gallery there);
-- an **iOS 16+ deployment target** (for `ImageRenderer`). On earlier targets every
-  preview is captured as a full-screen screenshot instead.
-
-## Quick checklist
-
-- [ ] Preview returns the component (or a `VStack` of variants), not a screen.
-- [ ] No `List` / `Form` / `NavigationStack` / `TabView` / `.toolbar` wrapper
-      (unless you also add an unwrapped preview).
-- [ ] No `@Previewable @State`, bare `return`, or `private` types in the body.
-- [ ] Preview is named.
-- [ ] Greedy components given a `.frame(width:)` if you want a specific size.
-
-## Compose (forthcoming)
-
-Component-only capture for Jetpack Compose is planned. The same principle will
-apply: preview the composable on its own (`MyComponent()` with a little
-`Modifier.padding()`), and avoid hosting it inside `Scaffold`, `LazyColumn`, or a
-full-screen layout if you want a cropped image.
+A catalogue with zero "no preview" / "skipped" badges is one where every component
+renders as intended.
