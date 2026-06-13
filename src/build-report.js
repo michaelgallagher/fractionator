@@ -49,8 +49,11 @@ function renderHtml(catalogue) {
     }
   }
 
-  // Lookup so a component card can render the showcases it appears in.
-  const showcaseById = new Map(allShowcases.map((s) => [s.id, s]));
+  // Lookup so a component card can render the showcases it appears in. Keyed by
+  // platform + id so ids can't collide across platforms.
+  const showcaseById = new Map(
+    allShowcases.map((s) => [`${s.platform}:${s.id}`, s]),
+  );
 
   // Sort by usage count descending
   allComponents.sort((a, b) => b.usageCount - a.usageCount);
@@ -490,7 +493,7 @@ function renderComponentCard(comp, showcaseById = new Map()) {
   const screenshots = comp.screenshots || [];
   const status = previewStatus(comp);
   const showcases = (comp.appearsIn || [])
-    .map((id) => showcaseById.get(id))
+    .map((id) => showcaseById.get(`${comp.platform}:${id}`))
     .filter(Boolean);
 
   const statusBadge =

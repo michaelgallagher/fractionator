@@ -2,7 +2,10 @@ const { execSync, spawnSync } = require("child_process");
 const { globSync } = require("glob");
 const path = require("path");
 const fs = require("fs");
-const { extractBraceBlock } = require("./swift-component-scanner");
+const {
+  extractBraceBlock,
+  stripSwiftComments,
+} = require("./swift-component-scanner");
 const { MODES, screenshotFilename } = require("./variation-modes");
 
 // Sentinel comment so we can detect our own injections
@@ -28,7 +31,9 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  * @param {number} [options.settleMs=1500] - ms to wait after launch
  * @param {string[]} [options.modes=["baseline"]] - display-trait modes to
  *   capture each preview under (see variation-modes.js)
- * @returns {Map<string, string[]>} componentName → [screenshot relative paths]
+ * @returns {Map<string, object>} previewId → { id, previewName, sourceFile,
+ *   renders, fallbackComponent, screenshots: [{ path, mode, ... }] }. Attribution
+ *   to components/showcases is done downstream from `renders`.
  */
 async function captureComponentScreenshots(
   components,
@@ -340,8 +345,22 @@ async function captureOneIosPreview(
     }
   }
 
-  const existing = screenshotMap.get(preview.componentName) || [];
-  existing.push({
+  // Record by preview id. Attribution to components/showcases happens downstream
+  // from the preview's `renders` set, so one capture can belong to several
+  // components (a showcase) without being duplicated.
+  let rec = screenshotMap.get(preview.id);
+  if (!rec) {
+    rec = {
+      id: preview.id,
+      previewName: preview.previewName,
+      sourceFile: preview.sourceFile,
+      renders: preview.renders || [],
+      fallbackComponent: preview.fallbackComponent || null,
+      screenshots: [],
+    };
+    screenshotMap.set(preview.id, rec);
+  }
+  rec.screenshots.push({
     path: `screenshots/${filename}`,
     previewName: preview.previewName,
     id: preview.id,
@@ -349,7 +368,6 @@ async function captureOneIosPreview(
     modeLabel: MODES[modeId].label,
     cropped,
   });
-  screenshotMap.set(preview.componentName, existing);
   return true;
 }
 
@@ -397,29 +415,96 @@ function applyIosMode(udid, traits) {
 // ---------------------------------------------------------------------------
 
 /**
- * Extract #Preview block bodies from all component source files.
- * Returns [{ id, componentName, previewName, body }]
+ * Extract capturable #Preview blocks across all component files, preview-centric.
+ * Each file is processed once; a preview's `renders` set (the known components its
+ * body constructs) drives attribution downstream — one component, several (a
+ * showcase), or none (the name/file fallback).
+ *
+ * Returns [{ id, previewName, body, wrapper, renders, fallbackComponent,
+ * sourceFile }].
  */
 function extractAllPreviews(components, projectPath) {
-  const previews = [];
+  const componentNames = new Set(components.map((c) => c.name));
 
+  // Group components by file so a file shared by several components is read once
+  // (and a preview isn't duplicated across them).
+  const fileMap = new Map(); // filePath → [component, ...]
   for (const comp of components) {
-    const content = fs.readFileSync(comp.filePath, "utf-8");
-    const compPreviews = extractPreviewBlocks(content, comp.name);
-    previews.push(...compPreviews);
+    const arr = fileMap.get(comp.filePath) || [];
+    arr.push(comp);
+    fileMap.set(comp.filePath, arr);
+  }
+
+  const previews = [];
+  const seenIds = new Set();
+
+  for (const [filePath, fileComponents] of fileMap) {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const relativePath = path.relative(projectPath, filePath);
+    const fileStem = path.basename(filePath, ".swift");
+    // The file's namesake component (or its first) backs previews that render no
+    // known component — e.g. a whole-screen preview.
+    const fallback =
+      fileComponents.find((c) => c.name === fileStem) || fileComponents[0];
+
+    const records = extractPreviewRecords(content).filter((r) => !r.skip);
+    for (const rec of records) {
+      let id = sanitize(`${fileStem}_${rec.previewName}`);
+      if (seenIds.has(id)) {
+        let n = 2;
+        while (seenIds.has(`${id}_${n}`)) n++;
+        id = `${id}_${n}`;
+      }
+      seenIds.add(id);
+
+      previews.push({
+        id,
+        previewName: rec.previewName,
+        body: rec.body,
+        wrapper: rec.wrapper,
+        renders: detectRenderedComponents(rec.body, componentNames, null),
+        fallbackComponent: fallback ? fallback.name : null,
+        sourceFile: relativePath,
+      });
+    }
   }
 
   return previews;
 }
 
 /**
+ * The set of known component names a #Preview body constructs — its real
+ * subjects. SwiftUI components are used as `Name(...)`, so we match `Name(`
+ * against the known component names, after stripping comments/strings so a name
+ * in a comment or string literal doesn't false-match.
+ */
+function detectRenderedComponents(body, componentNames, selfName) {
+  if (!body) return [];
+  const stripped = stripSwiftComments(body).replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  const found = [];
+  for (const name of componentNames) {
+    if (name === selfName) continue;
+    if (new RegExp(`\\b${escapeRegExp(name)}\\s*\\(`).test(stripped)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
+
+/** Escape a string for safe use inside a RegExp. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * Extract all #Preview { ... } blocks from a file, with a skip classification.
- * Returns [{ id, componentName, previewName, body, wrapper, skip }] where:
+ * Returns [{ previewName, body, wrapper, skip }] where:
  *  - `skip` is null for capturable previews, or a short human-readable reason;
  *  - `wrapper` is non-null for `@Previewable @State` previews we can capture by
  *    hoisting the state into a generated wrapper View (see parsePreviewableState).
+ * Identity and component attribution are assigned by the caller from the body.
  */
-function extractPreviewRecords(content, componentName) {
+function extractPreviewRecords(content) {
   const results = [];
 
   // Collect names of private/fileprivate types in this file so we can
@@ -441,8 +526,6 @@ function extractPreviewRecords(content, componentName) {
 
     const body = block.content.trim();
     if (!body) continue;
-
-    const id = `${componentName}_${sanitize(previewName)}`;
 
     let wrapper = null;
     let skip = null;
@@ -468,14 +551,7 @@ function extractPreviewRecords(content, componentName) {
       skip = "references a private type";
     }
 
-    results.push({
-      id,
-      componentName,
-      previewName,
-      body,
-      wrapper,
-      skip,
-    });
+    results.push({ previewName, body, wrapper, skip });
   }
 
   return results;
@@ -585,14 +661,6 @@ function isBalancedLine(line) {
 }
 
 /**
- * Capturable #Preview blocks from a file (skip === null).
- * Returns [{ id, componentName, previewName, body }]
- */
-function extractPreviewBlocks(content, componentName) {
-  return extractPreviewRecords(content, componentName).filter((r) => !r.skip);
-}
-
-/**
  * Static analysis of every component's previews — which exist and, for those we
  * can't capture, why. Needs no simulator, so the report can explain missing
  * previews even when screenshot capture is skipped or fails.
@@ -609,7 +677,7 @@ function analyzePreviews(components, projectPath) {
     } catch {
       continue;
     }
-    const records = extractPreviewRecords(content, comp.name);
+    const records = extractPreviewRecords(content);
     map.set(
       comp.name,
       records.map((r) => ({ previewName: r.previewName, skip: r.skip })),
@@ -1111,4 +1179,9 @@ function extractBundleId(appPath) {
   }
 }
 
-module.exports = { captureComponentScreenshots, analyzePreviews };
+module.exports = {
+  captureComponentScreenshots,
+  analyzePreviews,
+  // Exported for unit tests.
+  detectRenderedComponents,
+};
