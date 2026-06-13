@@ -26,6 +26,11 @@ These docs go deeper on each part of the tool.
   across platforms and curating a mapping.
 - **[Architecture](architecture.md)** — the pipeline and module map.
 
+## Accessibility
+
+- **[A11Y.md](a11y/A11Y.md)** — the WCAG 2.2 AA standard the generated report must
+  meet, plus the [audit](a11y/REPORT.md) and logged [exceptions](a11y/EXCEPTIONS.md).
+
 ## Plans
 
 - **[Plans](plans/README.md)** — what's planned and what's shipped. Completed plans
