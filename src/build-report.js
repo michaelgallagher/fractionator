@@ -970,6 +970,8 @@ body.modal-open { overflow: hidden; }
 }
 .detail-modal-close:hover { color: var(--text); }
 .detail-modal-content .component-card { margin: 0; border: none; }
+/* Keep the header pills clear of the close button (top-right). */
+.detail-modal-content .card-header { padding-right: 3rem; }
 
 .tab-bar {
   display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem;
