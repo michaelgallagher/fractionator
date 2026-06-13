@@ -429,18 +429,61 @@ function renderScreenshots(screenshots) {
     .join("\n        ");
 }
 
+/**
+ * Classify a component's preview coverage so the report can explain a missing
+ * image instead of silently omitting it:
+ *  - captured: at least one screenshot (optionally flagged all-fallback)
+ *  - none:     no #Preview exists in the source
+ *  - skipped:  a #Preview exists but couldn't be captured (with the reason)
+ */
+function previewStatus(comp) {
+  const screenshots = comp.screenshots || [];
+  if (screenshots.length > 0) {
+    const allFallback = screenshots.every((s) => s.cropped === false);
+    return { kind: "captured", allFallback };
+  }
+
+  const previewCount = (comp.previews || []).length;
+  if (previewCount === 0) {
+    return { kind: "none", label: "No #Preview in the source file." };
+  }
+
+  const reasons = [
+    ...new Set(
+      (comp.previewDiagnostics || []).filter((d) => d.skip).map((d) => d.skip),
+    ),
+  ];
+  return {
+    kind: "skipped",
+    label: reasons.length
+      ? `#Preview exists but wasn't captured: ${reasons.join("; ")}.`
+      : "#Preview exists but couldn't be captured.",
+  };
+}
+
 function renderComponentCard(comp) {
   const screenList = [...new Set(comp.usages.map((u) => u.enclosingView))];
   const variantCount = comp.variants.length;
   const screenshots = comp.screenshots || [];
+  const status = previewStatus(comp);
 
-  return `<article class="component-card" data-name="${esc(comp.name)}" data-usages="${comp.usageCount}" data-variants="${variantCount}" data-platform="${comp.platform}">
+  const statusBadge =
+    status.kind === "none"
+      ? `<span class="badge badge-no-preview">no preview</span>`
+      : status.kind === "skipped"
+        ? `<span class="badge badge-no-preview">preview skipped</span>`
+        : status.allFallback
+          ? `<span class="badge badge-fallback">full-screen</span>`
+          : "";
+
+  return `<article class="component-card" data-name="${esc(comp.name)}" data-usages="${comp.usageCount}" data-variants="${variantCount}" data-platform="${comp.platform}" data-preview-status="${status.kind}">
       <div class="card-header">
         <h3 class="card-title">${esc(comp.name)}</h3>
         <div class="card-meta">
           <span class="badge badge-platform">${comp.platform}</span>
           <span class="badge">${comp.usageCount} usage${comp.usageCount !== 1 ? "s" : ""}</span>
           ${variantCount > 1 ? `<span class="badge badge-variants">${variantCount} variants</span>` : ""}
+          ${statusBadge}
         </div>
       </div>
       <div class="card-body">
@@ -450,7 +493,10 @@ function renderComponentCard(comp) {
           <h4>Preview${screenshots.length > 1 ? "s" : ""}</h4>
           ${renderScreenshots(screenshots)}
         </div>`
-            : ""
+            : `<div class="card-section">
+          <h4>Preview</h4>
+          <p class="preview-missing preview-missing-${status.kind}">${esc(status.label)}</p>
+        </div>`
         }
         <div class="card-section">
           <h4>File</h4>
@@ -609,9 +655,15 @@ select {
 }
 .badge-platform { background: var(--accent-light); color: var(--accent); font-weight: 600; }
 .badge-variants { background: #fef3c7; color: #92400e; }
+.badge-no-preview { background: #fee2e2; color: #991b1b; }
+.badge-fallback { background: #e0e7ff; color: #3730a3; }
 @media (prefers-color-scheme: dark) {
   .badge-variants { background: #422006; color: #fbbf24; }
+  .badge-no-preview { background: #450a0a; color: #fca5a5; }
+  .badge-fallback { background: #1e1b4b; color: #a5b4fc; }
 }
+
+.preview-missing { font-size: 0.85rem; color: var(--text-secondary); font-style: italic; margin: 0; }
 
 .card-body { padding: 0.75rem 1rem; }
 .card-section { margin-bottom: 0.75rem; }

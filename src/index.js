@@ -14,7 +14,10 @@ const {
 const { scanUsages } = require("./usage-scanner");
 const { groupVariants } = require("./variant-grouper");
 const { buildReport } = require("./build-report");
-const { captureComponentScreenshots } = require("./swift-screenshot-capture");
+const {
+  captureComponentScreenshots,
+  analyzePreviews,
+} = require("./swift-screenshot-capture");
 const { captureAndroidScreenshots } = require("./kotlin-screenshot-capture");
 const { matchComponents } = require("./cross-platform-matcher");
 const { generateMappingYaml } = require("./mapping-generator");
@@ -68,6 +71,11 @@ async function generate(options) {
 
     const variantMap = groupVariants(components, usageMap);
 
+    // Static preview diagnostics (no simulator needed): which previews exist
+    // and, for those we can't capture, why. Drives the report's "no preview" /
+    // "skipped" status so missing previews are explained, not silently absent.
+    const previewDiagnostics = analyzePreviews(components, sources.ios);
+
     // Capture screenshots of component previews
     let screenshotMap = new Map();
     if (!options.noScreenshots && !options.initMapping) {
@@ -98,6 +106,7 @@ async function generate(options) {
         relativePath: comp.relativePath,
         signature: comp.signature,
         previews: comp.previews,
+        previewDiagnostics: previewDiagnostics.get(comp.name) || [],
         screenshots,
         usageCount: usages.length,
         usages: usages.map((u) => ({

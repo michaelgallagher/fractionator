@@ -413,15 +413,12 @@ function extractAllPreviews(components, projectPath) {
 }
 
 /**
- * Extract all #Preview { ... } blocks from a file.
- * Returns [{ id, componentName, previewName, body }]
- *
- * Skips previews that:
- * - Use @Previewable (state macro that can't be extracted)
- * - Have bare return statements
- * - Reference private/fileprivate types from the same file
+ * Extract all #Preview { ... } blocks from a file, with a skip classification.
+ * Returns [{ id, componentName, previewName, body, skip }] where `skip` is null
+ * for capturable previews or a short human-readable reason for ones we can't
+ * relocate into the generated gallery (see classifyPreviewSkip).
  */
-function extractPreviewBlocks(content, componentName) {
+function extractPreviewRecords(content, componentName) {
   const results = [];
 
   // Collect names of private/fileprivate types in this file so we can
@@ -444,50 +441,91 @@ function extractPreviewBlocks(content, componentName) {
     const body = block.content.trim();
     if (!body) continue;
 
-    // Skip previews that use @Previewable — these declare @State inside
-    // the preview block, which is a Swift macro that doesn't work when
-    // the body is wrapped in AnyView() or extracted into a different context.
-    if (body.includes("@Previewable")) continue;
-
-    // Skip previews with bare `return` statements — these are multi-statement
-    // preview bodies that can't be wrapped in AnyView().
-    if (/^\s*return\s/m.test(body)) continue;
-
-    // Skip previews that reference `$` bindings (likely from @Previewable @State)
-    // but check it's not just a string interpolation
-    if (/\$\w+/.test(body) && !body.includes("\\(")) {
-      // Might have binding references — check if there's a @State elsewhere
-      // in the file near this preview
-      const nearbyContent = content.slice(
-        Math.max(0, match.index - 200),
-        match.index,
-      );
-      if (/@Previewable|@State/.test(nearbyContent)) continue;
-    }
-
-    // Skip previews that reference private/fileprivate types — these are
-    // inaccessible from FractionatorGallery.swift (a different file).
-    if (privateTypes.length > 0) {
-      const usesPrivateType = privateTypes.some((name) => {
-        // Look for the type name used as a constructor call or type reference
-        const re = new RegExp(`\\b${name}\\b`);
-        return re.test(body);
-      });
-      if (usesPrivateType) continue;
-    }
-
-    // Create a unique ID
     const id = `${componentName}_${sanitize(previewName)}`;
+    const skip = classifyPreviewSkip(body, content, match.index, privateTypes);
 
     results.push({
       id,
       componentName,
       previewName,
       body,
+      skip,
     });
   }
 
   return results;
+}
+
+/**
+ * Decide whether a #Preview body can be relocated into FractionatorGallery.swift
+ * and captured. Returns null when it can, or a short reason when it can't — the
+ * reason is surfaced in the report so a missing preview is explained rather than
+ * silently absent.
+ */
+function classifyPreviewSkip(body, content, matchIndex, privateTypes) {
+  // @Previewable declares @State inside the preview block — a macro that doesn't
+  // work once the body is wrapped in AnyView() in a different context.
+  if (body.includes("@Previewable")) {
+    return "interactive preview (@Previewable state)";
+  }
+
+  // Bare `return` means a multi-statement body that can't be wrapped in AnyView().
+  if (/^\s*return\s/m.test(body)) {
+    return "multi-statement preview (uses return)";
+  }
+
+  // `$` bindings (likely from @Previewable @State) — but ignore string
+  // interpolation. Confirm by looking for nearby @State / @Previewable.
+  if (/\$\w+/.test(body) && !body.includes("\\(")) {
+    const nearbyContent = content.slice(Math.max(0, matchIndex - 200), matchIndex);
+    if (/@Previewable|@State/.test(nearbyContent)) {
+      return "interactive preview (state binding)";
+    }
+  }
+
+  // private/fileprivate types are inaccessible from the generated gallery file.
+  if (privateTypes.length > 0) {
+    const usesPrivateType = privateTypes.some((name) =>
+      new RegExp(`\\b${name}\\b`).test(body),
+    );
+    if (usesPrivateType) return "references a private type";
+  }
+
+  return null;
+}
+
+/**
+ * Capturable #Preview blocks from a file (skip === null).
+ * Returns [{ id, componentName, previewName, body }]
+ */
+function extractPreviewBlocks(content, componentName) {
+  return extractPreviewRecords(content, componentName).filter((r) => !r.skip);
+}
+
+/**
+ * Static analysis of every component's previews — which exist and, for those we
+ * can't capture, why. Needs no simulator, so the report can explain missing
+ * previews even when screenshot capture is skipped or fails.
+ *
+ * @returns {Map<string, {previewName: string, skip: string|null}[]>}
+ *   componentName → one entry per #Preview found in its source file.
+ */
+function analyzePreviews(components, projectPath) {
+  const map = new Map();
+  for (const comp of components) {
+    let content;
+    try {
+      content = fs.readFileSync(comp.filePath, "utf-8");
+    } catch {
+      continue;
+    }
+    const records = extractPreviewRecords(content, comp.name);
+    map.set(
+      comp.name,
+      records.map((r) => ({ previewName: r.previewName, skip: r.skip })),
+    );
+  }
+  return map;
 }
 
 /**
@@ -576,18 +614,59 @@ ${cases}
         var image = renderer.uiImage
         // Retry, only on failure: propose a phone-width so width-greedy views
         // (.frame(maxWidth: .infinity)) can resolve. Additive — this never runs
-        // for a preview the ideal-size pass already rendered.
-        if image == nil {
+        // for a preview the ideal-size pass already rendered. A blank image
+        // counts as a failure here too: some containers (notably ScrollView)
+        // render a correctly-sized but empty canvas, which we'd rather retry —
+        // and ultimately reject — than mistake for a real crop.
+        if image == nil || isBlank(image!) {
             renderer.proposedSize = ProposedViewSize(width: 390, height: nil)
             image = renderer.uiImage
         }
 
-        guard let image,
+        // Skip writing a blank render: ImageRenderer can't rasterize some views
+        // (e.g. ScrollView content) and returns a non-nil but empty image. By
+        // not writing the PNG we let the capture loop fall back to a full-screen
+        // screenshot, which shows the live-rendered preview instead of a white box.
+        guard let image, !isBlank(image),
               let data = image.pngData(),
               let docs = FileManager.default.urls(
                   for: .documentDirectory, in: .userDomainMask).first
         else { return }
         try? data.write(to: docs.appendingPathComponent(id + ".png"))
+    }
+
+    /// True when the rendered image carries essentially no visible content —
+    /// every pixel the same colour (a white or fully-transparent canvas). The
+    /// image is downscaled into a small bitmap and checked for any colour
+    /// variance, so real content (glyphs, buttons, text) stays well clear of the
+    /// threshold while a uniform canvas is reliably caught.
+    private func isBlank(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage, cg.width > 0, cg.height > 0 else { return true }
+        let w = min(cg.width, 32)
+        let h = min(cg.height, 32)
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: w * 4, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        // Compare every sampled pixel against the first; any meaningful colour
+        // or alpha difference means there's something to show.
+        let r0 = pixels[0], g0 = pixels[1], b0 = pixels[2], a0 = pixels[3]
+        var i = 0
+        while i < pixels.count {
+            if abs(Int(pixels[i]) - Int(r0)) > 8 ||
+               abs(Int(pixels[i + 1]) - Int(g0)) > 8 ||
+               abs(Int(pixels[i + 2]) - Int(b0)) > 8 ||
+               abs(Int(pixels[i + 3]) - Int(a0)) > 8 {
+                return false
+            }
+            i += 4
+        }
+        return true
     }
 
     private func writeMarker(_ id: String) {
@@ -910,4 +989,4 @@ function extractBundleId(appPath) {
   }
 }
 
-module.exports = { captureComponentScreenshots };
+module.exports = { captureComponentScreenshots, analyzePreviews };
