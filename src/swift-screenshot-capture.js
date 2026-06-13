@@ -414,9 +414,10 @@ function extractAllPreviews(components, projectPath) {
 
 /**
  * Extract all #Preview { ... } blocks from a file, with a skip classification.
- * Returns [{ id, componentName, previewName, body, skip }] where `skip` is null
- * for capturable previews or a short human-readable reason for ones we can't
- * relocate into the generated gallery (see classifyPreviewSkip).
+ * Returns [{ id, componentName, previewName, body, wrapper, skip }] where:
+ *  - `skip` is null for capturable previews, or a short human-readable reason;
+ *  - `wrapper` is non-null for `@Previewable @State` previews we can capture by
+ *    hoisting the state into a generated wrapper View (see parsePreviewableState).
  */
 function extractPreviewRecords(content, componentName) {
   const results = [];
@@ -442,13 +443,37 @@ function extractPreviewRecords(content, componentName) {
     if (!body) continue;
 
     const id = `${componentName}_${sanitize(previewName)}`;
-    const skip = classifyPreviewSkip(body, content, match.index, privateTypes);
+
+    let wrapper = null;
+    let skip = null;
+
+    if (body.includes("@Previewable")) {
+      // `@Previewable @State` declares preview-local state. The macro can't be
+      // lifted into AnyView() in another file, but we can hoist the declarations
+      // into a generated wrapper View whose real @State backs the $bindings.
+      const parsed = parsePreviewableState(body);
+      if (parsed) {
+        wrapper = parsed;
+      } else {
+        skip = "interactive preview (@Previewable state)";
+      }
+    } else {
+      skip = classifyPreviewSkip(body, content, match.index, privateTypes);
+    }
+
+    // A private/fileprivate type is inaccessible from the gallery file whether or
+    // not we wrap the preview — so re-check and override the wrapper.
+    if (wrapper && referencesPrivateType(body, privateTypes)) {
+      wrapper = null;
+      skip = "references a private type";
+    }
 
     results.push({
       id,
       componentName,
       previewName,
       body,
+      wrapper,
       skip,
     });
   }
@@ -457,18 +482,12 @@ function extractPreviewRecords(content, componentName) {
 }
 
 /**
- * Decide whether a #Preview body can be relocated into FractionatorGallery.swift
- * and captured. Returns null when it can, or a short reason when it can't — the
- * reason is surfaced in the report so a missing preview is explained rather than
- * silently absent.
+ * Decide whether a (non-@Previewable) #Preview body can be relocated into
+ * FractionatorGallery.swift and captured. Returns null when it can, or a short
+ * reason when it can't — the reason is surfaced in the report so a missing
+ * preview is explained rather than silently absent.
  */
 function classifyPreviewSkip(body, content, matchIndex, privateTypes) {
-  // @Previewable declares @State inside the preview block — a macro that doesn't
-  // work once the body is wrapped in AnyView() in a different context.
-  if (body.includes("@Previewable")) {
-    return "interactive preview (@Previewable state)";
-  }
-
   // Bare `return` means a multi-statement body that can't be wrapped in AnyView().
   if (/^\s*return\s/m.test(body)) {
     return "multi-statement preview (uses return)";
@@ -484,14 +503,85 @@ function classifyPreviewSkip(body, content, matchIndex, privateTypes) {
   }
 
   // private/fileprivate types are inaccessible from the generated gallery file.
-  if (privateTypes.length > 0) {
-    const usesPrivateType = privateTypes.some((name) =>
-      new RegExp(`\\b${name}\\b`).test(body),
-    );
-    if (usesPrivateType) return "references a private type";
+  if (referencesPrivateType(body, privateTypes)) {
+    return "references a private type";
   }
 
   return null;
+}
+
+/** True when a preview body uses any of the file's private/fileprivate types. */
+function referencesPrivateType(body, privateTypes) {
+  return privateTypes.some((name) => new RegExp(`\\b${name}\\b`).test(body));
+}
+
+/**
+ * Parse a `@Previewable @State` preview body into the pieces needed to build a
+ * wrapper View: the hoisted property declarations and the remaining view body.
+ *
+ * Returns `{ stateDecls: string[], viewBody: string }`, or null when the body
+ * can't be transformed safely — in which case the caller skips it as before. The
+ * checks are deliberately conservative: a malformed wrapper would fail to compile
+ * and take the whole gallery build (and every screenshot) down with it, so
+ * anything unfamiliar bails rather than guesses.
+ */
+function parsePreviewableState(body) {
+  const lines = body.split("\n");
+  const stateDecls = [];
+  const bodyLines = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("@Previewable")) {
+      bodyLines.push(line);
+      continue;
+    }
+    // Strip the @Previewable attribute; what's left is an ordinary stored
+    // property the wrapper View can declare.
+    const decl = trimmed.replace(/^@Previewable\s+/, "");
+    // Only accept known property wrappers on a single, balanced line. A
+    // multi-line initializer would split across our line filter and break.
+    if (
+      !/^@(State|StateObject|Bindable|Environment|AppStorage|SceneStorage|FocusState)\b/.test(
+        decl,
+      ) ||
+      !isBalancedLine(decl)
+    ) {
+      return null;
+    }
+    stateDecls.push(decl);
+  }
+
+  if (stateDecls.length === 0) return null;
+  const viewBody = bodyLines.join("\n").trim();
+  if (!viewBody) return null;
+
+  return { stateDecls, viewBody };
+}
+
+/**
+ * Conservative balance check: parens/brackets/braces matched and quotes paired,
+ * ignoring delimiters inside string literals. Used to reject multi-line
+ * declarations we shouldn't try to hoist onto a single line.
+ */
+function isBalancedLine(line) {
+  let paren = 0,
+    bracket = 0,
+    brace = 0,
+    quotes = 0;
+  for (const ch of line) {
+    if (ch === '"') {
+      quotes++;
+    } else if (quotes % 2 === 0) {
+      if (ch === "(") paren++;
+      else if (ch === ")") paren--;
+      else if (ch === "[") bracket++;
+      else if (ch === "]") bracket--;
+      else if (ch === "{") brace++;
+      else if (ch === "}") brace--;
+    }
+  }
+  return paren === 0 && bracket === 0 && brace === 0 && quotes % 2 === 0;
 }
 
 /**
@@ -557,21 +647,36 @@ function collectPrivateTypes(content) {
  * (dark, type) are reproduced; `ImageRenderer` otherwise renders in a detached,
  * default environment. The PNG is written to the app's Documents directory under
  * the preview id, where the capture loop collects it.
+ *
+ * `@Previewable @State` previews can't be inlined into AnyView() — the macro is
+ * preview-only. Those carry a `wrapper` (see parsePreviewableState): we emit a
+ * dedicated View struct that declares real @State for the hoisted bindings, and
+ * the switch case instantiates it instead of inlining the body.
  */
 function generateGallerySource(previews) {
+  const wrappers = [];
+
   const cases = previews
-    .map(
-      (p) => `        case "${p.id}":
+    .map((p) => {
+      if (p.wrapper) {
+        const structName = `FractionatorPreview_${sanitize(p.id)}`;
+        wrappers.push(generateWrapperStruct(structName, p.wrapper));
+        return `        case "${p.id}":
+            AnyView(${structName}())`;
+      }
+      return `        case "${p.id}":
             AnyView(
                 ${indentBody(p.body, 16)}
-            )`,
-    )
+            )`;
+    })
     .join("\n");
+
+  const wrapperSource = wrappers.length ? `\n${wrappers.join("\n\n")}\n` : "";
 
   return `${SENTINEL}
 import SwiftUI
 import UIKit
-
+${wrapperSource}
 struct FractionatorGallery: View {
     let previewId: String
     @Environment(\\.displayScale) private var displayScale
@@ -677,6 +782,23 @@ ${cases}
     }
 }
 `;
+}
+
+/**
+ * Generate a wrapper View struct for a `@Previewable @State` preview: the hoisted
+ * declarations become real stored properties, and the remaining preview content
+ * becomes the @ViewBuilder body so its $bindings resolve against that state.
+ */
+function generateWrapperStruct(structName, wrapper) {
+  const decls = wrapper.stateDecls.map((d) => `    ${d}`).join("\n");
+  return `struct ${structName}: View {
+${decls}
+
+    @ViewBuilder
+    var body: some View {
+        ${indentBody(wrapper.viewBody, 8)}
+    }
+}`;
 }
 
 /**
