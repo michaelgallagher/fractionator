@@ -101,6 +101,7 @@ ${CSS}
 </style>
 </head>
 <body class="view-gallery">
+<a href="#main" class="skip-link">Skip to content</a>
 <div class="container">
   <header>
     <h1>Component catalogue</h1>
@@ -108,6 +109,7 @@ ${CSS}
     <p class="generated-at">Generated ${esc(generatedAt)}</p>
   </header>
 
+  <main id="main" tabindex="-1">
   ${renderTabs([
     {
       id: "components",
@@ -134,21 +136,22 @@ ${CSS}
       </div>
     </section>
 
-    <section class="controls">
+    <section class="controls" aria-label="Filter and sort components">
+      <label for="search" class="sr-only">Filter components</label>
       <input type="text" id="search" placeholder="Filter components..." autocomplete="off">
-      <label>
-        <select id="sort">
-          <option value="usages-desc">Most used</option>
-          <option value="usages-asc">Least used</option>
-          <option value="name-asc">Name A–Z</option>
-          <option value="name-desc">Name Z–A</option>
-          <option value="variants-desc">Most variants</option>
-        </select>
-      </label>
+      <label for="sort" class="sr-only">Sort components</label>
+      <select id="sort">
+        <option value="usages-desc">Most used</option>
+        <option value="usages-asc">Least used</option>
+        <option value="name-asc">Name A–Z</option>
+        <option value="name-desc">Name Z–A</option>
+        <option value="variants-desc">Most variants</option>
+      </select>
       <div class="view-toggle" role="group" aria-label="View mode">
         <button type="button" class="view-btn" data-view="gallery" aria-pressed="true">Gallery</button>
         <button type="button" class="view-btn" data-view="list" aria-pressed="false">List</button>
       </div>
+      <p id="result-status" class="sr-only" role="status" aria-live="polite"></p>
     </section>
 
     <section class="components" id="components">
@@ -177,6 +180,7 @@ ${CSS}
         ]
       : []),
   ])}
+  </main>
 </div>
 
 <div id="detail-modal" class="detail-modal hidden" role="dialog" aria-modal="true" aria-label="Component detail">
@@ -210,20 +214,20 @@ function renderTabs(tabs) {
   const bar = tabs
     .map(
       (t, i) =>
-        `<button class="tab-btn${i === 0 ? " active" : ""}" role="tab" aria-selected="${i === 0}" aria-controls="tab-${t.id}" data-tab="${t.id}">${t.label}</button>`,
+        `<button class="tab-btn${i === 0 ? " active" : ""}" id="tabbtn-${t.id}" role="tab" aria-selected="${i === 0}" aria-controls="tab-${t.id}" tabindex="${i === 0 ? "0" : "-1"}" data-tab="${t.id}">${t.label}</button>`,
     )
     .join("\n    ");
 
   const panels = tabs
     .map(
       (t, i) =>
-        `<div class="tab-panel${i === 0 ? "" : " hidden"}" id="tab-${t.id}">
+        `<div class="tab-panel${i === 0 ? "" : " hidden"}" id="tab-${t.id}" role="tabpanel" aria-labelledby="tabbtn-${t.id}" tabindex="0">
     ${t.content}
   </div>`,
     )
     .join("\n  ");
 
-  return `<div class="tab-bar" role="tablist">
+  return `<div class="tab-bar" role="tablist" aria-label="Catalogue sections">
     ${bar}
   </div>
 
@@ -478,7 +482,7 @@ function renderScreenshots(screenshots) {
     const figures = screenshots
       .map(
         (s) => `<figure class="screenshot-figure">
-              <img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)}" class="screenshot-img" loading="lazy">
+              <button type="button" class="screenshot-btn" aria-label="Expand preview: ${esc(s.previewName)}"><img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)}" class="screenshot-img" loading="lazy"></button>
               ${screenshots.length > 1 ? `<figcaption>${esc(s.previewName)}</figcaption>` : ""}
             </figure>`,
       )
@@ -502,7 +506,7 @@ function renderScreenshots(screenshots) {
       const figures = group.shots
         .map(
           (s) => `<figure class="screenshot-figure">
-              <img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)} (${esc(s.modeLabel || s.mode)})" class="screenshot-img" loading="lazy">
+              <button type="button" class="screenshot-btn" aria-label="Expand preview: ${esc(s.previewName)} (${esc(s.modeLabel || s.mode)})"><img src="${esc(s.path)}" alt="Preview: ${esc(s.previewName)} (${esc(s.modeLabel || s.mode)})" class="screenshot-img" loading="lazy"></button>
               <figcaption>${esc(s.modeLabel || s.mode)}</figcaption>
             </figure>`,
         )
@@ -1158,6 +1162,40 @@ body.modal-open { overflow: hidden; }
 .loc-file { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; }
 .loc-file code { font-family: var(--mono); font-size: 0.72rem; color: var(--text); word-break: break-all; }
 .loc-lines { font-size: 0.7rem; color: var(--text-secondary); }
+
+/* --- Accessibility --- */
+/* Visually hidden, still read by assistive tech (labels, status messages). */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+/* Skip link: off-screen until focused, then pinned top-left. */
+.skip-link {
+  position: absolute; left: 0.5rem; top: -3rem; z-index: 300;
+  background: var(--surface); color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px;
+  padding: 0.5rem 0.85rem; font-size: 0.9rem; text-decoration: none;
+  transition: top 0.15s;
+}
+.skip-link:focus { top: 0.5rem; }
+main:focus { outline: none; }
+
+/* A single, always-visible focus indicator (A11Y.md: >=2px, never suppressed). */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Grouped buttons live in overflow:hidden containers; inset the ring so it shows. */
+.view-btn:focus-visible, .tab-btn:focus-visible { outline-offset: -2px; }
+#components .component-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+
+/* The thumbnail wrapper is a button but should look like the bare image. */
+.screenshot-btn {
+  display: block; padding: 0; margin: 0; border: none; background: none;
+  cursor: pointer; font: inherit; color: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+  .screenshot-img:hover { transform: none; }
+}
 `;
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1207,7 @@ const JS = `
   const search = document.getElementById('search');
   const sort = document.getElementById('sort');
   const container = document.getElementById('components');
+  const resultStatus = document.getElementById('result-status');
 
   function getCards() {
     return Array.from(container.querySelectorAll('.component-card'));
@@ -1191,16 +1230,24 @@ const JS = `
 
   function applyFilter() {
     const q = search.value.toLowerCase().trim();
+    let visible = 0;
     for (const card of getCards()) {
       const name = card.dataset.name.toLowerCase();
       const platform = card.dataset.platform;
       const match = !q || name.includes(q) || platform.includes(q);
       card.classList.toggle('hidden', !match);
+      if (match) visible++;
     }
     // Hide a platform heading once its whole group is filtered out.
     for (const h of getHeadings()) {
       const anyVisible = cardsAfter(h).some((c) => !c.classList.contains('hidden'));
       h.classList.toggle('hidden', !anyVisible);
+    }
+    // Announce the result count to screen readers (A11Y.md: dynamic feedback).
+    if (resultStatus) {
+      resultStatus.textContent =
+        visible + ' component' + (visible === 1 ? '' : 's') +
+        (q ? ' match "' + search.value.trim() + '"' : ' shown');
     }
   }
 
@@ -1236,8 +1283,29 @@ const JS = `
   search.addEventListener('input', applyFilter);
   sort.addEventListener('change', applySort);
 
-  // Gallery / List view toggle (persisted)
+  // Gallery / List view toggle (persisted). In gallery view each tile is a
+  // button that opens the detail modal, so it must be focusable and labelled; in
+  // list view the tile is plain content (its own "Details" expander is the only
+  // interactive part), so it must not be a button.
   const viewBtns = Array.from(document.querySelectorAll('.view-btn'));
+  function setTileInteractivity(isGallery) {
+    for (const card of getCards()) {
+      if (isGallery) {
+        card.setAttribute('role', 'button');
+        card.setAttribute('tabindex', '0');
+        card.setAttribute('aria-label', 'View details for ' + card.dataset.name);
+      } else {
+        card.removeAttribute('role');
+        card.removeAttribute('tabindex');
+        card.removeAttribute('aria-label');
+      }
+      // The thumbnail's own expand button is redundant while the whole tile is a
+      // button; pull it out of the tab order in gallery, restore it in list view.
+      card.querySelectorAll('.screenshot-btn').forEach(function(b) {
+        b.tabIndex = isGallery ? -1 : 0;
+      });
+    }
+  }
   function applyView(view) {
     const v = view === 'list' ? 'list' : 'gallery';
     document.body.classList.toggle('view-gallery', v === 'gallery');
@@ -1245,6 +1313,7 @@ const JS = `
     for (const btn of viewBtns) {
       btn.setAttribute('aria-pressed', String(btn.dataset.view === v));
     }
+    setTileInteractivity(v === 'gallery');
     try { localStorage.setItem('fractionator-view', v); } catch (e) {}
   }
   for (const btn of viewBtns) {
@@ -1254,15 +1323,37 @@ const JS = `
   try { savedView = localStorage.getItem('fractionator-view') || 'gallery'; } catch (e) {}
   applyView(savedView);
 
-  // Detail modal: clicking a gallery tile opens its full card.
+  // Detail modal: clicking (or pressing Enter/Space on) a gallery tile opens its
+  // full card in a focus-trapped dialog.
   const modal = document.getElementById('detail-modal');
   const modalContent = modal.querySelector('.detail-modal-content');
+  let modalTrigger = null;
+
+  function visibleFocusables(root) {
+    return Array.from(root.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea, summary, [tabindex]:not([tabindex="-1"])'
+    )).filter(function(el) { return el.offsetParent !== null; });
+  }
+
   function openDetail(card) {
+    modalTrigger = card;
     modalContent.innerHTML = '';
     const clone = card.cloneNode(true);
     clone.classList.remove('hidden');
+    // The clone is the full detail view, not a tile button.
+    clone.removeAttribute('role');
+    clone.removeAttribute('tabindex');
+    clone.removeAttribute('aria-label');
     // Drill-in shows everything: open the "Details" expander (and any nested ones).
-    clone.querySelectorAll('details').forEach((d) => { d.open = true; });
+    clone.querySelectorAll('details').forEach(function(d) { d.open = true; });
+    clone.querySelectorAll('.screenshot-btn').forEach(function(b) { b.tabIndex = 0; });
+    // Name the dialog after the component.
+    const title = clone.querySelector('.card-title');
+    if (title) {
+      title.id = 'detail-modal-title';
+      modal.setAttribute('aria-labelledby', 'detail-modal-title');
+      modal.removeAttribute('aria-label');
+    }
     modalContent.appendChild(clone);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
@@ -1273,64 +1364,95 @@ const JS = `
     modal.classList.add('hidden');
     document.body.classList.remove('modal-open');
     modalContent.innerHTML = '';
+    modal.removeAttribute('aria-labelledby');
+    modal.setAttribute('aria-label', 'Component detail');
+    // Return focus to the tile that opened the dialog.
+    if (modalTrigger) { modalTrigger.focus(); modalTrigger = null; }
   }
   container.addEventListener('click', function(e) {
     if (!document.body.classList.contains('view-gallery')) return;
     const card = e.target.closest('.component-card');
-    if (card) openDetail(card);
+    if (card) { e.preventDefault(); openDetail(card); }
+  });
+  container.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (!document.body.classList.contains('view-gallery')) return;
+    const card = e.target.closest('.component-card');
+    if (card && card === e.target) { e.preventDefault(); openDetail(card); }
   });
   modal.querySelector('.detail-modal-backdrop').addEventListener('click', closeDetail);
   modal.querySelector('.detail-modal-close').addEventListener('click', closeDetail);
+  // Trap Tab within the open dialog (A11Y.md: modals trap focus).
+  modal.addEventListener('keydown', function(e) {
+    if (e.key !== 'Tab' || modal.classList.contains('hidden')) return;
+    const f = visibleFocusables(modal);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+
+  // Screenshot lightbox state, shared with the Escape handler below.
+  let expandedBtn = null;
+  function collapseLightbox() {
+    const img = document.querySelector('.screenshot-img.expanded');
+    if (img) img.classList.remove('expanded');
+    const overlay = document.querySelector('.screenshot-overlay');
+    if (overlay) overlay.remove();
+    if (expandedBtn) { expandedBtn.focus(); expandedBtn = null; }
+  }
+  // Escape closes the lightbox first, then the modal.
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
-    const expanded = document.querySelector('.screenshot-img.expanded');
-    if (expanded) {
-      expanded.classList.remove('expanded');
-      document.querySelector('.screenshot-overlay')?.remove();
-      return;
-    }
+    if (document.querySelector('.screenshot-img.expanded')) { collapseLightbox(); return; }
     closeDetail();
   });
 
-  // Tab switching
-  document.querySelectorAll('.tab-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      document.querySelectorAll('.tab-btn').forEach(function(b) {
-        b.classList.remove('active');
-        b.setAttribute('aria-selected', 'false');
-      });
-      document.querySelectorAll('.tab-panel').forEach(function(p) {
-        p.classList.add('hidden');
-      });
-      btn.classList.add('active');
-      btn.setAttribute('aria-selected', 'true');
-      var target = document.getElementById('tab-' + btn.dataset.tab);
-      if (target) target.classList.remove('hidden');
+  // Tabs: activate panel, roving tabindex, and arrow/Home/End nav (APG tablist).
+  const tabBtns = Array.from(document.querySelectorAll('.tab-btn'));
+  function activateTab(btn) {
+    for (const b of tabBtns) {
+      const selected = b === btn;
+      b.classList.toggle('active', selected);
+      b.setAttribute('aria-selected', String(selected));
+      b.tabIndex = selected ? 0 : -1;
+    }
+    document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.add('hidden'); });
+    const target = document.getElementById('tab-' + btn.dataset.tab);
+    if (target) target.classList.remove('hidden');
+  }
+  tabBtns.forEach(function(btn, i) {
+    btn.addEventListener('click', function() { activateTab(btn); });
+    btn.addEventListener('keydown', function(e) {
+      let j = null;
+      if (e.key === 'ArrowRight') j = (i + 1) % tabBtns.length;
+      else if (e.key === 'ArrowLeft') j = (i - 1 + tabBtns.length) % tabBtns.length;
+      else if (e.key === 'Home') j = 0;
+      else if (e.key === 'End') j = tabBtns.length - 1;
+      if (j === null) return;
+      e.preventDefault();
+      activateTab(tabBtns[j]);
+      tabBtns[j].focus();
     });
   });
 
-  // Screenshot expand/collapse
+  // Screenshot expand/collapse (list view, showcases, and inside the modal).
   document.addEventListener('click', function(e) {
-    if (e.target.classList.contains('screenshot-overlay')) {
-      e.target.remove();
-      document.querySelector('.screenshot-img.expanded')?.classList.remove('expanded');
-      return;
-    }
-    if (e.target.classList.contains('screenshot-img')) {
-      // In gallery mode a tile thumbnail opens the detail modal (handled by the
-      // container click listener); don't also pop the lightbox.
-      if (document.body.classList.contains('view-gallery') && e.target.closest('#components')) {
-        return;
-      }
-      if (e.target.classList.contains('expanded')) {
-        e.target.classList.remove('expanded');
-        document.querySelector('.screenshot-overlay')?.remove();
-      } else {
-        const overlay = document.createElement('div');
-        overlay.className = 'screenshot-overlay';
-        document.body.appendChild(overlay);
-        e.target.classList.add('expanded');
-      }
+    if (e.target.classList.contains('screenshot-overlay')) { collapseLightbox(); return; }
+    const btn = e.target.closest('.screenshot-btn');
+    if (!btn) return;
+    // In a gallery tile the click opens the detail modal instead (handled above).
+    if (document.body.classList.contains('view-gallery') && container.contains(btn)) return;
+    const img = btn.querySelector('.screenshot-img');
+    if (!img) return;
+    if (img.classList.contains('expanded')) {
+      collapseLightbox();
+    } else {
+      const overlay = document.createElement('div');
+      overlay.className = 'screenshot-overlay';
+      document.body.appendChild(overlay);
+      img.classList.add('expanded');
+      expandedBtn = btn;
     }
   });
 })();
@@ -1444,4 +1566,4 @@ function renderTokenMarkdown(lines, tokens) {
   }
 }
 
-module.exports = { buildReport, detectSpacingScale };
+module.exports = { buildReport, detectSpacingScale, renderHtml };
