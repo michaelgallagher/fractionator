@@ -179,6 +179,14 @@ ${CSS}
   ])}
 </div>
 
+<div id="detail-modal" class="detail-modal hidden" role="dialog" aria-modal="true" aria-label="Component detail">
+  <div class="detail-modal-backdrop"></div>
+  <div class="detail-modal-body">
+    <button type="button" class="detail-modal-close" aria-label="Close">&times;</button>
+    <div class="detail-modal-content"></div>
+  </div>
+</div>
+
 <script>
 ${JS}
 </script>
@@ -858,6 +866,8 @@ select {
 .component-card.hidden { display: none; }
 
 /* --- Gallery view --- */
+/* Tile rules are scoped to #components so the detail modal (which clones a card
+   outside #components) renders the full, un-collapsed card. */
 body.view-gallery .container { max-width: 1400px; }
 body.view-gallery #components {
   display: grid;
@@ -865,27 +875,47 @@ body.view-gallery #components {
   gap: 1rem;
   align-items: start;
 }
-body.view-gallery .component-card { margin-bottom: 0; }
+body.view-gallery #components .component-card { margin-bottom: 0; cursor: pointer; }
+body.view-gallery #components .component-card:hover { border-color: var(--accent); }
 /* Compact tile: keep header + preview, drop the detail sections. */
-body.view-gallery .card-body > .card-section { display: none; }
-body.view-gallery .card-body > .card-section-preview { display: block; margin-bottom: 0; }
-body.view-gallery .card-section-preview h4 { display: none; }
+body.view-gallery #components .card-body > .card-section { display: none; }
+body.view-gallery #components .card-body > .card-section-preview { display: block; margin-bottom: 0; }
+body.view-gallery #components .card-section-preview h4 { display: none; }
 /* Lean badges: platform + usage only. */
-body.view-gallery .card-meta .badge-variants,
-body.view-gallery .card-meta .badge-no-preview,
-body.view-gallery .card-meta .badge-fallback,
-body.view-gallery .card-meta .badge-showcase { display: none; }
+body.view-gallery #components .card-meta .badge-variants,
+body.view-gallery #components .card-meta .badge-no-preview,
+body.view-gallery #components .card-meta .badge-fallback,
+body.view-gallery #components .card-meta .badge-showcase { display: none; }
 /* One representative thumbnail per tile, so a component with many full-screen
    fallback captures doesn't stack into a giant cell and break the grid. */
-body.view-gallery .card-section-preview .screenshot-figure:not(:first-child),
-body.view-gallery .card-section-preview .preview-group:not(:first-of-type),
-body.view-gallery .card-section-preview .showcase-on-card:not(:first-of-type) { display: none; }
+body.view-gallery #components .card-section-preview .screenshot-figure:not(:first-child),
+body.view-gallery #components .card-section-preview .preview-group:not(:first-of-type),
+body.view-gallery #components .card-section-preview .showcase-on-card:not(:first-of-type) { display: none; }
 /* Letterbox thumbnails so a 126px glyph and a full-screen fallback both fit. */
-body.view-gallery .screenshot-strip { overflow: visible; }
-body.view-gallery .screenshot-img { max-height: 150px; }
-body.view-gallery .screenshot-figure figcaption,
-body.view-gallery .preview-group h5,
-body.view-gallery .showcase-note { display: none; }
+body.view-gallery #components .screenshot-strip { overflow: visible; }
+body.view-gallery #components .screenshot-img { max-height: 150px; }
+body.view-gallery #components .screenshot-figure figcaption,
+body.view-gallery #components .preview-group h5,
+body.view-gallery #components .showcase-note { display: none; }
+
+/* --- Detail modal (drill-in from a gallery tile) --- */
+body.modal-open { overflow: hidden; }
+.detail-modal { position: fixed; inset: 0; z-index: 200; }
+.detail-modal.hidden { display: none; }
+.detail-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); cursor: pointer; }
+.detail-modal-body {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(680px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+}
+.detail-modal-close {
+  position: absolute; top: 0.5rem; right: 0.5rem; z-index: 1; cursor: pointer;
+  width: 2rem; height: 2rem; border: none; border-radius: 6px; line-height: 1;
+  font-size: 1.4rem; background: var(--surface); color: var(--text-secondary);
+}
+.detail-modal-close:hover { color: var(--text); }
+.detail-modal-content .component-card { margin: 0; border: none; }
 
 .tab-bar {
   display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem;
@@ -1048,6 +1078,42 @@ const JS = `
   try { savedView = localStorage.getItem('fractionator-view') || 'gallery'; } catch (e) {}
   applyView(savedView);
 
+  // Detail modal: clicking a gallery tile opens its full card.
+  const modal = document.getElementById('detail-modal');
+  const modalContent = modal.querySelector('.detail-modal-content');
+  function openDetail(card) {
+    modalContent.innerHTML = '';
+    const clone = card.cloneNode(true);
+    clone.classList.remove('hidden');
+    modalContent.appendChild(clone);
+    modal.classList.remove('hidden');
+    document.body.classList.add('modal-open');
+    modal.querySelector('.detail-modal-close').focus();
+  }
+  function closeDetail() {
+    if (modal.classList.contains('hidden')) return;
+    modal.classList.add('hidden');
+    document.body.classList.remove('modal-open');
+    modalContent.innerHTML = '';
+  }
+  container.addEventListener('click', function(e) {
+    if (!document.body.classList.contains('view-gallery')) return;
+    const card = e.target.closest('.component-card');
+    if (card) openDetail(card);
+  });
+  modal.querySelector('.detail-modal-backdrop').addEventListener('click', closeDetail);
+  modal.querySelector('.detail-modal-close').addEventListener('click', closeDetail);
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    const expanded = document.querySelector('.screenshot-img.expanded');
+    if (expanded) {
+      expanded.classList.remove('expanded');
+      document.querySelector('.screenshot-overlay')?.remove();
+      return;
+    }
+    closeDetail();
+  });
+
   // Tab switching
   document.querySelectorAll('.tab-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
@@ -1073,6 +1139,11 @@ const JS = `
       return;
     }
     if (e.target.classList.contains('screenshot-img')) {
+      // In gallery mode a tile thumbnail opens the detail modal (handled by the
+      // container click listener); don't also pop the lightbox.
+      if (document.body.classList.contains('view-gallery') && e.target.closest('#components')) {
+        return;
+      }
       if (e.target.classList.contains('expanded')) {
         e.target.classList.remove('expanded');
         document.querySelector('.screenshot-overlay')?.remove();
