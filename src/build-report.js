@@ -285,14 +285,17 @@ function renderColorTokens(colors) {
         c.aliases && c.aliases.length
           ? ` <span class="token-alias" title="${esc(c.aliases.join(", "))}">+${c.aliases.length}</span>`
           : "";
-      return `<div class="color-chip" title="${esc(locationSummary(c.locations))}">
+      return `<details class="token-detail color-chip-detail">
+        <summary class="color-chip" title="${esc(locationSummary(c.locations))}">
         ${swatch}
         <div class="color-meta">
           <span class="color-name">${esc(c.display)}${aliasNote}</span>
           <span class="color-hex">${esc(hexLabel)}</span>
         </div>
         <span class="token-count">${c.count}</span>
-      </div>`;
+        </summary>
+        ${renderTokenLocations(c.locations)}
+      </details>`;
     })
     .join("\n      ");
 
@@ -313,12 +316,15 @@ function renderTypeTokens(typography) {
         ? Math.max(11, Math.min(34, t.size))
         : 15;
       const sizeLabel = t.size != null ? `${t.size}` : "—";
-      return `<div class="type-row" title="${esc(locationSummary(t.locations))}">
+      return `<details class="token-detail">
+        <summary class="type-row" title="${esc(locationSummary(t.locations))}">
         <span class="type-size">${sizeLabel}</span>
         <span class="type-preview" style="font-size:${previewPx}px;font-weight:${t.weight === "bold" || t.weight === "semibold" ? 600 : 400}">${esc(t.display)}</span>
         <span class="type-kind">${t.kind}</span>
         <span class="token-count">${t.count}</span>
-      </div>`;
+        </summary>
+        ${renderTokenLocations(t.locations)}
+      </details>`;
     })
     .join("\n      ");
 
@@ -333,23 +339,50 @@ function renderTypeTokens(typography) {
 function renderSpacingTokens(spacing) {
   if (!spacing.length) return "";
   const maxValue = spacing.reduce((m, s) => Math.max(m, s.value), 0) || 1;
+  const scale = detectSpacingScale(spacing);
+  const offCount = spacing.filter((s) => scale.outliers.has(s.value)).length;
+  const scaleNote = scale.base
+    ? ` <span class="token-scale-note">${scale.base}${spacing[0].unit} grid${offCount ? ` · ${offCount} off-scale` : ""}</span>`
+    : "";
   const rows = spacing
     .map((s) => {
       const widthPct = Math.max(2, (s.value / maxValue) * 100);
-      return `<div class="space-row" title="${esc(s.contexts.join(", "))} · ${esc(locationSummary(s.locations))}">
+      const offScale = scale.outliers.has(s.value);
+      return `<details class="token-detail">
+        <summary class="space-row${offScale ? " off-scale" : ""}" title="${esc(s.contexts.join(", "))} · ${esc(locationSummary(s.locations))}">
         <span class="space-value">${s.value}<span class="space-unit">${esc(s.unit)}</span></span>
         <span class="space-bar-track"><span class="space-bar" style="width:${widthPct}%"></span></span>
+        ${offScale ? `<span class="badge badge-offscale" title="Not a multiple of ${scale.base}${esc(s.unit)}">off-scale</span>` : "<span></span>"}
         <span class="token-count">${s.count}</span>
-      </div>`;
+        </summary>
+        ${renderTokenLocations(s.locations)}
+      </details>`;
     })
     .join("\n      ");
 
   return `<div class="token-group">
-      <h3 class="token-group-title">Spacing scale <span class="token-group-count">${spacing.length}</span></h3>
+      <h3 class="token-group-title">Spacing scale <span class="token-group-count">${spacing.length}</span>${scaleNote}</h3>
       <div class="space-list">
       ${rows}
       </div>
     </div>`;
+}
+
+/**
+ * Infer the spacing rhythm and flag off-scale values. SwiftUI and Compose
+ * prototypes conventionally follow a 4pt grid; treat that as the scale only when
+ * most non-zero values actually follow it (otherwise the rhythm is unknown and
+ * we flag nothing). Returns { base: number|null, outliers: Set<number> }.
+ */
+function detectSpacingScale(spacing) {
+  const values = [
+    ...new Set(spacing.map((s) => s.value).filter((v) => v > 0)),
+  ];
+  if (values.length < 3) return { base: null, outliers: new Set() };
+  const base = 4;
+  const onScale = values.filter((v) => v % base === 0).length;
+  if (onScale / values.length < 0.6) return { base: null, outliers: new Set() };
+  return { base, outliers: new Set(values.filter((v) => v % base !== 0)) };
 }
 
 /** Short human summary of where a token appears, for hover tooltips. */
@@ -359,6 +392,27 @@ function locationSummary(locations) {
   const shown = files.slice(0, 3).join(", ");
   const more = files.length > 3 ? ` +${files.length - 3} more` : "";
   return `${files.length} file${files.length !== 1 ? "s" : ""}: ${shown}${more}`;
+}
+
+/** Expandable list of every file:line a token appears at, grouped by file. */
+function renderTokenLocations(locations) {
+  if (!locations || !locations.length) return "";
+  const byFile = new Map();
+  for (const l of locations) {
+    if (!byFile.has(l.relativePath)) byFile.set(l.relativePath, []);
+    byFile.get(l.relativePath).push(l.lineNumber);
+  }
+  const items = [...byFile.entries()]
+    .map(
+      ([file, lines]) =>
+        `<li class="loc-file"><code>${esc(file)}</code> <span class="loc-lines">${lines
+          .map((n) => `L${n}`)
+          .join(", ")}</span></li>`,
+    )
+    .join("\n        ");
+  return `<ul class="token-locations">
+        ${items}
+      </ul>`;
 }
 
 function renderAlignment(alignment, platformOrder) {
@@ -1008,13 +1062,39 @@ body.modal-open { overflow: hidden; }
 /* Spacing scale */
 .space-list { display: flex; flex-direction: column; gap: 0.2rem; }
 .space-row {
-  display: grid; grid-template-columns: 3.5rem 1fr auto; align-items: center; gap: 0.75rem;
+  display: grid; grid-template-columns: 3.5rem 1fr auto auto; align-items: center; gap: 0.75rem;
   padding: 0.25rem 0.6rem;
 }
 .space-value { font-family: var(--mono); font-size: 0.8rem; text-align: right; }
 .space-unit { color: var(--text-secondary); font-size: 0.65rem; margin-left: 1px; }
 .space-bar-track { background: var(--badge-bg); border-radius: 999px; height: 0.55rem; }
 .space-bar { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.space-row.off-scale .space-bar { background: #d97706; }
+.badge-offscale { background: #fef3c7; color: #92400e; }
+@media (prefers-color-scheme: dark) {
+  .badge-offscale { background: #422006; color: #fbbf24; }
+  .space-row.off-scale .space-bar { background: #fbbf24; }
+}
+.token-scale-note { font-size: 0.7rem; font-weight: 500; color: var(--text-secondary); }
+
+/* Token deep-linking: each token is an expander revealing its usage locations. */
+.token-detail > summary { cursor: pointer; list-style: none; }
+.token-detail > summary::-webkit-details-marker { display: none; }
+.token-detail > summary::marker { content: ""; }
+.token-detail > summary:hover { border-color: var(--accent); }
+.type-list > .token-detail > summary.type-row:hover,
+.space-list > .token-detail > summary.space-row:hover { background: var(--accent-light); }
+.type-list > .token-detail:last-child > summary.type-row { border-bottom: none; }
+.color-chip-detail[open] { grid-column: 1 / -1; }
+.token-locations {
+  list-style: none; margin: 0.3rem 0 0.5rem; padding: 0.5rem 0.7rem;
+  background: var(--variant-bg); border: 1px solid var(--border); border-radius: 6px;
+  display: flex; flex-direction: column; gap: 0.25rem;
+  max-height: 240px; overflow-y: auto;
+}
+.loc-file { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; }
+.loc-file code { font-family: var(--mono); font-size: 0.72rem; color: var(--text); word-break: break-all; }
+.loc-lines { font-size: 0.7rem; color: var(--text-secondary); }
 `;
 
 // ---------------------------------------------------------------------------
@@ -1266,4 +1346,4 @@ function renderTokenMarkdown(lines, tokens) {
   }
 }
 
-module.exports = { buildReport };
+module.exports = { buildReport, detectSpacingScale };
