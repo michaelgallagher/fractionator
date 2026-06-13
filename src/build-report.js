@@ -152,7 +152,7 @@ ${CSS}
     </section>
 
     <section class="components" id="components">
-      ${allComponents.map((c) => renderComponentCard(c, showcaseById)).join("\n      ")}
+      ${renderComponentsBody(allComponents, platformOrder, showcaseById)}
     </section>`,
     },
     ...(allShowcases.length
@@ -553,6 +553,33 @@ function previewStatus(comp) {
   };
 }
 
+/**
+ * Render the component cards. With a single platform, a flat list (unchanged).
+ * With two or more, group under platform headings so iOS/Android don't
+ * interleave. Cards stay direct children of #components (headings included) so
+ * the gallery grid and the sort/filter JS keep working; headings span the grid
+ * row and the sort runs within each group.
+ */
+function renderComponentsBody(allComponents, platformOrder, showcaseById) {
+  if (platformOrder.length < 2) {
+    return allComponents
+      .map((c) => renderComponentCard(c, showcaseById))
+      .join("\n      ");
+  }
+  return platformOrder
+    .map((p) => {
+      const group = allComponents.filter((c) => c.platform === p);
+      if (!group.length) return "";
+      const heading = `<h2 class="platform-heading" data-platform="${esc(p)}">${PLATFORM_LABELS[p] || esc(p)} <span class="platform-heading-count">${group.length}</span></h2>`;
+      const cards = group
+        .map((c) => renderComponentCard(c, showcaseById))
+        .join("\n      ");
+      return `${heading}\n      ${cards}`;
+    })
+    .filter(Boolean)
+    .join("\n      ");
+}
+
 function renderComponentCard(comp, showcaseById = new Map()) {
   const screenList = [...new Set(comp.usages.map((u) => u.enclosingView))];
   const variantCount = comp.variants.length;
@@ -919,6 +946,16 @@ select {
 
 .component-card.hidden { display: none; }
 
+/* Platform section headings (only rendered when 2+ platforms are present). */
+.platform-heading {
+  font-size: 1.05rem; font-weight: 700; margin: 1.75rem 0 0.75rem;
+  display: flex; align-items: baseline; gap: 0.5rem;
+  padding-bottom: 0.35rem; border-bottom: 1px solid var(--border);
+}
+.platform-heading:first-child { margin-top: 0; }
+.platform-heading-count { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); }
+.platform-heading.hidden { display: none; }
+
 /* --- Gallery view --- */
 /* Tile rules are scoped to #components so the detail modal (which clones a card
    outside #components) renders the full, un-collapsed card. */
@@ -929,6 +966,8 @@ body.view-gallery #components {
   gap: 1rem;
   align-items: start;
 }
+body.view-gallery #components .platform-heading { grid-column: 1 / -1; margin: 0.5rem 0 0; }
+body.view-gallery #components .platform-heading:first-child { margin-top: 0; }
 body.view-gallery #components .component-card { margin-bottom: 0; cursor: pointer; }
 body.view-gallery #components .component-card:hover { border-color: var(--accent); }
 /* Compact tile: keep header + preview, drop the detail sections. */
@@ -1113,6 +1152,21 @@ const JS = `
     return Array.from(container.querySelectorAll('.component-card'));
   }
 
+  function getHeadings() {
+    return Array.from(container.querySelectorAll('.platform-heading'));
+  }
+
+  // The cards that follow a heading, up to the next heading.
+  function cardsAfter(heading) {
+    const cards = [];
+    let n = heading.nextElementSibling;
+    while (n && !n.classList.contains('platform-heading')) {
+      if (n.classList.contains('component-card')) cards.push(n);
+      n = n.nextElementSibling;
+    }
+    return cards;
+  }
+
   function applyFilter() {
     const q = search.value.toLowerCase().trim();
     for (const card of getCards()) {
@@ -1121,12 +1175,15 @@ const JS = `
       const match = !q || name.includes(q) || platform.includes(q);
       card.classList.toggle('hidden', !match);
     }
+    // Hide a platform heading once its whole group is filtered out.
+    for (const h of getHeadings()) {
+      const anyVisible = cardsAfter(h).some((c) => !c.classList.contains('hidden'));
+      h.classList.toggle('hidden', !anyVisible);
+    }
   }
 
-  function applySort() {
-    const cards = getCards();
-    const key = sort.value;
-    cards.sort((a, b) => {
+  function comparator(key) {
+    return (a, b) => {
       switch (key) {
         case 'usages-desc': return +b.dataset.usages - +a.dataset.usages;
         case 'usages-asc': return +a.dataset.usages - +b.dataset.usages;
@@ -1135,8 +1192,23 @@ const JS = `
         case 'variants-desc': return +b.dataset.variants - +a.dataset.variants;
         default: return 0;
       }
-    });
-    for (const card of cards) container.appendChild(card);
+    };
+  }
+
+  function applySort() {
+    const cmp = comparator(sort.value);
+    const headings = getHeadings();
+    if (headings.length) {
+      // Grouped: sort within each platform section, keeping headings in place.
+      for (const h of headings) {
+        const cards = cardsAfter(h).sort(cmp);
+        let anchor = h;
+        for (const c of cards) { anchor.after(c); anchor = c; }
+      }
+    } else {
+      const cards = getCards().sort(cmp);
+      for (const card of cards) container.appendChild(card);
+    }
   }
 
   search.addEventListener('input', applyFilter);
