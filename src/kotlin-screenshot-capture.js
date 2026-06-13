@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { MODES, screenshotFilename } = require("./variation-modes");
+const { stripKotlinComments } = require("./kotlin-component-scanner");
 
 // Sentinel comment so we can detect our own injections
 const SENTINEL = "// FRACTIONATOR_INJECTED";
@@ -32,7 +33,9 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  *   first launch, which is a cold start and shows the app splash screen
  * @param {string[]} [options.modes=["baseline"]] - display-trait modes to
  *   capture each preview under (see variation-modes.js)
- * @returns {Map<string, object[]>} componentName → [{ path, previewName, id }]
+ * @returns {Map<string, object>} previewId → { id, functionName, previewName,
+ *   sourceFile, renders, fallbackComponent, screenshots: [{ path, mode, ... }] }.
+ *   Attribution to components/showcases is done downstream from `renders`.
  */
 async function captureAndroidScreenshots(
   components,
@@ -55,8 +58,9 @@ async function captureAndroidScreenshots(
     console.log("   No capturable @Preview functions found — skipping screenshots");
     return new Map();
   }
+  const skippedCount = countSkippedKotlinPreviews(components);
   console.log(
-    `   Found ${previews.length} capturable preview functions (${previews.length + countPrivatePreviews(components)} total, ${countPrivatePreviews(components)} private/skipped)`,
+    `   Found ${previews.length} capturable preview functions (${previews.length + skippedCount} total, ${skippedCount} private/parameterized/skipped)`,
   );
 
   // 2. Detect project structure
@@ -118,7 +122,7 @@ async function captureAndroidScreenshots(
       // Extract just the error lines for a cleaner message
       const errorLines = out
         .split("\n")
-        .filter((l) => /\bERROR\b|error:/i.test(l))
+        .filter((l) => /\bERROR\b|error:|^e: /i.test(l))
         .slice(0, 20)
         .join("\n");
       throw new Error(
@@ -131,6 +135,16 @@ async function captureAndroidScreenshots(
     const apkPath = findBuiltApk(appModule);
     adb(emulator, ["install", "-r", apkPath]);
     console.log(`   APK installed (${applicationId})`);
+
+    // Component-only capture pulls the gallery's rendered PNGs from the app's
+    // private files via `run-as`, which works for debuggable (debug) builds.
+    // Probe once; if it's unavailable, fall back to full-screen captures.
+    const componentCapture = canRunAs(emulator, applicationId);
+    console.log(
+      componentCapture
+        ? "   Component-only capture enabled"
+        : "   run-as unavailable — using full-screen captures",
+    );
 
     // 7. Screenshot loop. Display-trait modes are the outer loop: each mode is
     // applied once as a global override (no rebuild). Changing font scale or
@@ -172,6 +186,14 @@ async function captureAndroidScreenshots(
           await warmUp(emulator, activityComponent, coldStartMs);
         }
 
+        const filename = screenshotFilename(sanitize(preview.id), modeId);
+        const destFile = path.join(screenshotsDir, filename);
+
+        // Clear any stale rendered files so their presence reflects this launch.
+        if (componentCapture) {
+          clearRendered(emulator, applicationId, preview.id);
+        }
+
         // Launch gallery activity with preview ID (warm recomposition)
         const launchResult = launchGallery(
           emulator,
@@ -186,44 +208,77 @@ async function captureAndroidScreenshots(
           continue;
         }
 
-        // Wait for the warm recomposition to render, then capture.
-        await sleep(settleMs);
-
-        // Capture screenshot via adb
-        const filename = screenshotFilename(sanitize(preview.id), modeId);
-        const destFile = path.join(screenshotsDir, filename);
-
-        try {
-          const pngData = spawnSync(
-            "adb",
-            ["-s", emulator, "exec-out", "screencap", "-p"],
-            { timeout: 10_000, maxBuffer: 20 * 1024 * 1024 },
+        // Prefer the gallery's component-only render (pulled via run-as); fall
+        // back to a full-screen screencap when there's no rendered image.
+        let cropped = false;
+        if (componentCapture) {
+          const done = await waitForMarker(
+            emulator,
+            applicationId,
+            preview.id,
+            settleMs + 6000,
+            250,
           );
-
-          if (
-            pngData.status === 0 &&
-            pngData.stdout &&
-            pngData.stdout.length > 0
-          ) {
-            fs.writeFileSync(destFile, pngData.stdout);
-            const existing = screenshotMap.get(preview.componentName) || [];
-            existing.push({
-              path: `screenshots/${filename}`,
-              previewName: preview.previewName,
-              id: preview.id,
-              mode: modeId,
-              modeLabel: mode.label,
-            });
-            screenshotMap.set(preview.componentName, existing);
-            captured++;
-          } else {
-            console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+          if (done && pullRendered(emulator, applicationId, preview.id, destFile)) {
+            cropped = true;
+          } else if (!done) {
+            await sleep(settleMs);
           }
-        } catch (err) {
-          console.warn(
-            `   ⚠️  Screenshot error for ${preview.id} [${modeId}]: ${err.message}`,
-          );
+        } else {
+          // Wait for the warm recomposition to render, then capture.
+          await sleep(settleMs);
         }
+
+        if (!cropped) {
+          try {
+            const pngData = spawnSync(
+              "adb",
+              ["-s", emulator, "exec-out", "screencap", "-p"],
+              { timeout: 10_000, maxBuffer: 20 * 1024 * 1024 },
+            );
+            if (
+              pngData.status === 0 &&
+              pngData.stdout &&
+              pngData.stdout.length > 0
+            ) {
+              fs.writeFileSync(destFile, pngData.stdout);
+            } else {
+              console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+              continue;
+            }
+          } catch (err) {
+            console.warn(
+              `   ⚠️  Screenshot error for ${preview.id} [${modeId}]: ${err.message}`,
+            );
+            continue;
+          }
+        }
+
+        // Record by preview id. Attribution to components/showcases happens
+        // downstream from the preview's `renders` set, so the same capture can
+        // belong to several components (a showcase) without being duplicated.
+        let rec = screenshotMap.get(preview.id);
+        if (!rec) {
+          rec = {
+            id: preview.id,
+            functionName: preview.functionName,
+            previewName: preview.previewName,
+            sourceFile: preview.sourceFile,
+            renders: preview.renders || [],
+            fallbackComponent: preview.fallbackComponent || null,
+            screenshots: [],
+          };
+          screenshotMap.set(preview.id, rec);
+        }
+        rec.screenshots.push({
+          path: `screenshots/${filename}`,
+          previewName: preview.previewName,
+          id: preview.id,
+          mode: modeId,
+          modeLabel: mode.label,
+          cropped,
+        });
+        captured++;
       }
     }
 
@@ -256,16 +311,20 @@ async function captureAndroidScreenshots(
 // ---------------------------------------------------------------------------
 
 /**
- * Scan component files for @Preview @Composable functions.
- * Returns [{ id, componentName, previewName, functionName, packageName }]
+ * Scan component files for capturable @Preview @Composable functions.
+ * Returns [{ id, functionName, previewName, packageName, renders,
+ * fallbackComponent, sourceFile }] — one entry per capturable preview.
  *
- * Processes each file only once (to avoid duplicates when multiple components
- * share a file). Associates each preview function with the best-matching
- * component from the same file based on name similarity.
- *
- * Skips private/internal preview functions (can't be imported by the gallery).
+ * Processes each file once. `renders` is the set of known component names the
+ * preview body calls (its real subjects); `fallbackComponent` is the legacy
+ * name/file best-match, used only when a preview renders no known component.
+ * Skips private and parameterised preview functions (see classifyKotlinPreviewSkip).
  */
 function extractAllKotlinPreviews(components, projectPath) {
+  // The full set of known component names — a preview can render components
+  // imported from other files, so attribution is global, not per-file.
+  const componentNames = new Set(components.map((c) => c.name));
+
   // Group components by file to process each file once
   const fileMap = new Map(); // filePath → [component, ...]
   for (const comp of components) {
@@ -275,25 +334,48 @@ function extractAllKotlinPreviews(components, projectPath) {
   }
 
   const previews = [];
+  const seenIds = new Set();
 
   for (const [filePath, fileComponents] of fileMap) {
     const content = fs.readFileSync(filePath, "utf-8");
     const packageName = extractPackageName(content);
     if (!packageName) continue;
 
-    // Extract all preview functions from this file once
-    const filePreviews = extractPreviewFunctions(content, packageName);
+    const relativePath = path.relative(projectPath, filePath);
+    const records = extractPreviewFunctionRecords(
+      content,
+      packageName,
+      componentNames,
+    ).filter((r) => !r.skip);
 
-    // Associate each preview with the best-matching component
-    for (const preview of filePreviews) {
-      const bestMatch = matchPreviewToComponent(
+    for (const preview of records) {
+      // Preview-centric, component-independent id (the gallery imports and calls
+      // the function by name). Deduped so two same-named functions don't collide.
+      let id = sanitize(preview.functionName);
+      if (seenIds.has(id)) {
+        let n = 2;
+        while (seenIds.has(`${id}_${n}`)) n++;
+        id = `${id}_${n}`;
+      }
+      seenIds.add(id);
+
+      // Fallback owner for previews whose body renders no known component
+      // (e.g. a whole-screen preview) — keeps today's name/file heuristic.
+      const fallback = matchPreviewToComponent(
         preview.functionName,
         fileComponents,
         filePath,
       );
-      preview.componentName = bestMatch.name;
-      preview.id = `${bestMatch.name}_${sanitize(preview.previewName)}`;
-      previews.push(preview);
+
+      previews.push({
+        id,
+        functionName: preview.functionName,
+        previewName: preview.previewName,
+        packageName: preview.packageName,
+        renders: preview.renders,
+        fallbackComponent: fallback ? fallback.name : null,
+        sourceFile: relativePath,
+      });
     }
   }
 
@@ -346,75 +428,304 @@ function matchPreviewToComponent(previewFunctionName, components, filePath) {
 }
 
 /**
- * Count private preview functions across all component files (for reporting).
+ * Count preview functions we skip across all component files (for reporting).
  * Deduplicates by file path to avoid counting the same file multiple times
  * when it contains multiple components.
  */
-function countPrivatePreviews(components) {
+function countSkippedKotlinPreviews(components) {
   const seen = new Set();
   let count = 0;
   for (const comp of components) {
     if (seen.has(comp.filePath)) continue;
     seen.add(comp.filePath);
-    const content = fs.readFileSync(comp.filePath, "utf-8");
-    const pattern =
-      /@Preview\b(?:\s*\([^)]*\))?\s*@Composable\s+private\s+fun\s+\w+/g;
-    while (pattern.exec(content) !== null) count++;
+    let content;
+    try {
+      content = fs.readFileSync(comp.filePath, "utf-8");
+    } catch {
+      continue;
+    }
+    const pkg = extractPackageName(content) || "";
+    for (const rec of extractPreviewFunctionRecords(content, pkg)) {
+      if (rec.skip) count++;
+    }
   }
   return count;
 }
 
 /**
- * Extract @Preview @Composable function declarations from a single file.
- *
- * Skips private/internal functions (inaccessible from the gallery activity).
- *
- * Returns [{ previewName, functionName, packageName }]
- * (componentName and id are set later by matchPreviewToComponent)
+ * Extract every @Preview @Composable function in a file, with a skip
+ * classification. Returns
+ * [{ previewName, functionName, packageName, skip, renders }] where `skip` is
+ * null for capturable previews or a short reason otherwise, and `renders` is the
+ * set of known component names the preview body calls (empty unless
+ * `componentNames` is supplied).
  */
-function extractPreviewFunctions(content, packageName) {
+function extractPreviewFunctionRecords(content, packageName, componentNames = null) {
   const results = [];
 
-  // Match @Preview followed by @Composable fun (with optional params/modifiers)
-  // @Preview can have optional annotation arguments: @Preview(name = "...", ...)
+  // @Preview, then any number of further annotations (e.g. multipreview helpers),
+  // then @Composable fun NAME(. @Preview may carry args: @Preview(name = "...").
   const pattern =
-    /@Preview\b(?:\s*\([^)]*\))?\s*@Composable\s+(?:(private|internal)\s+)?fun\s+(\w+)\s*\(/g;
+    /@Preview\b(?:\s*\([^)]*\))?\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*@Composable\s+(?:(private|internal)\s+)?fun\s+(\w+)\s*\(/g;
   let match;
 
   while ((match = pattern.exec(content)) !== null) {
     const visibility = match[1]; // private, internal, or undefined
     const functionName = match[2];
+    // The match ends on the opening '(' of the parameter list.
+    const openParen = pattern.lastIndex - 1;
+    const closeParen = matchDelimiter(content, openParen, "(", ")");
+    const params =
+      closeParen > openParen ? content.slice(openParen + 1, closeParen) : "";
+    const previewName = derivePreviewName(match[0], functionName);
+    const skip = classifyKotlinPreviewSkip(visibility, params);
 
-    // Skip private/internal functions — can't be imported by gallery
-    if (visibility === "private" || visibility === "internal") continue;
-
-    // Extract preview name from @Preview annotation
-    const annotationText = match[0];
-    const nameParam = annotationText.match(/name\s*=\s*"([^"]+)"/);
-
-    let previewName;
-    if (nameParam) {
-      previewName = nameParam[1];
-    } else {
-      // Generate a name from the function name
-      const stripped = functionName
-        .replace(/Preview$/, "")
-        .replace(/Dark$/, "");
-      const label = stripped
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-        .trim();
-      previewName = label || "Default";
+    let renders = [];
+    if (componentNames && componentNames.size) {
+      const body = extractFunctionBody(content, closeParen);
+      renders = detectRenderedComponents(body, componentNames, functionName);
     }
 
-    results.push({
-      previewName,
-      functionName,
-      packageName,
-    });
+    results.push({ previewName, functionName, packageName, skip, renders });
   }
 
   return results;
+}
+
+/**
+ * The set of known component names a preview body renders — i.e. the component
+ * names it calls (`Name(`). This is the evidence used to attribute a preview to
+ * one component or recognise it as a multi-component showcase. Comments and
+ * strings are stripped first so a name in a comment/string doesn't false-match.
+ */
+function detectRenderedComponents(body, componentNames, selfName) {
+  if (!body) return [];
+  const stripped = stripKotlinComments(body);
+  const found = [];
+  for (const name of componentNames) {
+    if (name === selfName) continue;
+    // Composable components are PascalCase; skip lowercase helper functions the
+    // scanner may have picked up (e.g. getSampleCardData).
+    if (!/^[A-Z]/.test(name)) continue;
+    if (new RegExp(`\\b${escapeRegExp(name)}\\s*\\(`).test(stripped)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
+
+/**
+ * Inner text of the `{ ... }` body that follows a function's parameter list.
+ * `closeParenIndex` is the index of the parameter list's closing ')'. Returns ""
+ * when no body brace is found.
+ */
+function extractFunctionBody(content, closeParenIndex) {
+  if (closeParenIndex < 0) return "";
+  const braceOpen = content.indexOf("{", closeParenIndex);
+  if (braceOpen === -1) return "";
+  const braceClose = matchDelimiter(content, braceOpen, "{", "}");
+  return braceClose === -1
+    ? content.slice(braceOpen + 1)
+    : content.slice(braceOpen + 1, braceClose);
+}
+
+/**
+ * Index of the delimiter matching the one at `openIndex` (e.g. the ')' closing an
+ * '('), honouring nesting and ignoring delimiters inside string literals. Returns
+ * -1 if unbalanced.
+ */
+function matchDelimiter(content, openIndex, open, close) {
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  for (let i = openIndex; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (ch === stringChar && content[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Escape a string for safe use inside a RegExp. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Capturable @Preview functions from a file (skip === null).
+ * Returns [{ previewName, functionName, packageName }].
+ */
+function extractPreviewFunctions(content, packageName) {
+  return extractPreviewFunctionRecords(content, packageName).filter(
+    (r) => !r.skip,
+  );
+}
+
+/**
+ * Decide whether a @Preview function can be called from the generated gallery.
+ * Returns null when it can, or a short reason when it can't.
+ */
+function classifyKotlinPreviewSkip(visibility, params) {
+  // A private top-level fun is file-scoped, so the gallery (a different file)
+  // can't call it. `internal` is module-visible and the gallery lives in the
+  // same module, so those are fine to call — don't skip them.
+  if (visibility === "private") {
+    return "private preview (not visible to the generated gallery)";
+  }
+  // The gallery invokes each preview as `fn()`. A parameter without a default —
+  // including @PreviewParameter providers — makes that call fail to compile,
+  // which would take the whole gallery build (and every screenshot) down. Skip
+  // it rather than emit an uncompilable call.
+  if (params && requiresArguments(params)) {
+    return "parameterized preview (requires arguments the gallery can't supply)";
+  }
+  return null;
+}
+
+/** Derive a human-readable preview name from the annotation or function name. */
+function derivePreviewName(annotationText, functionName) {
+  const nameParam = annotationText.match(/name\s*=\s*"([^"]+)"/);
+  if (nameParam) return nameParam[1];
+  const stripped = functionName.replace(/Preview$/, "").replace(/Dark$/, "");
+  const label = stripped
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .trim();
+  return label || "Default";
+}
+
+/**
+ * Static analysis of every component's @Preview functions — which exist and, for
+ * those we can't capture, why. Needs no emulator, so the report can explain a
+ * missing preview even when capture is skipped or fails.
+ *
+ * @returns {Map<string, {previewName: string, skip: string|null}[]>}
+ *   componentName → one entry per @Preview found, associated to its component the
+ *   same way the capture path associates them.
+ */
+function analyzeKotlinPreviews(components, projectPath) {
+  const fileMap = new Map(); // filePath → [component, ...]
+  for (const comp of components) {
+    const existing = fileMap.get(comp.filePath) || [];
+    existing.push(comp);
+    fileMap.set(comp.filePath, existing);
+  }
+
+  const map = new Map();
+  for (const [filePath, fileComponents] of fileMap) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      continue;
+    }
+    const packageName = extractPackageName(content) || "";
+    for (const rec of extractPreviewFunctionRecords(content, packageName)) {
+      const best = matchPreviewToComponent(
+        rec.functionName,
+        fileComponents,
+        filePath,
+      );
+      const list = map.get(best.name) || [];
+      list.push({ previewName: rec.previewName, skip: rec.skip });
+      map.set(best.name, list);
+    }
+  }
+  return map;
+}
+
+/**
+ * Whether a Kotlin parameter list has any parameter the gallery can't satisfy by
+ * calling `fn()` — i.e. a parameter with no default value. @PreviewParameter
+ * providers count as required (they have no default), so they're caught here too.
+ */
+function requiresArguments(paramStr) {
+  return splitTopLevel(paramStr).some(
+    (p) => p.trim().length > 0 && !paramHasDefault(p),
+  );
+}
+
+/** Split a parameter list on top-level commas (ignoring nesting and strings). */
+function splitTopLevel(str) {
+  const out = [];
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  let cur = "";
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (inString) {
+      cur += ch;
+      if (ch === stringChar && str[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{" || ch === "<") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ">" && str[i - 1] !== "-") depth--; // '>' but not the '->' arrow
+    if (ch === "," && depth <= 0) {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/** Whether a single parameter declaration carries a default value (`= ...`). */
+function paramHasDefault(param) {
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  for (let i = 0; i < param.length; i++) {
+    const ch = param[i];
+    if (inString) {
+      if (ch === stringChar && param[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{" || ch === "<") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ">" && param[i - 1] !== "-") depth--;
+    else if (ch === "=" && depth <= 0) {
+      const prev = param[i - 1];
+      const next = param[i + 1];
+      // A default assignment '=', not a comparison (==, !=, <=, >=).
+      if (
+        prev !== "=" &&
+        prev !== "!" &&
+        prev !== "<" &&
+        prev !== ">" &&
+        next !== "="
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -430,8 +741,19 @@ function extractPackageName(content) {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate FractionatorGalleryActivity.kt — an Activity that imports all
- * public @Preview functions and renders the selected one based on an intent extra.
+ * Generate FractionatorGalleryActivity.kt — an Activity that imports all public
+ * @Preview functions and renders the selected one based on an intent extra.
+ *
+ * The selected preview is both displayed (so the full-screen capture fallback
+ * still works) and recorded to a `GraphicsLayer`, which is converted to a
+ * component-sized PNG via `toImageBitmap()` — the Compose analog of iOS's
+ * `ImageRenderer`. The capture happens on an inner Box that wraps the component:
+ * the root `Box(fillMaxSize)` passes loose constraints down, so the inner Box
+ * sizes to the component's content (a button crops tight; a `fillMaxWidth`
+ * component gets screen width with content height; a full-screen layout gets the
+ * window, but without the system bars). The PNG and a completion marker are
+ * written to the app's internal `files/` dir, where the capture loop collects
+ * them via `run-as`.
  */
 function generateGalleryActivity(previews, targetPackage) {
   // Collect unique imports
@@ -454,14 +776,28 @@ function generateGalleryActivity(previews, targetPackage) {
 package ${targetPackage}
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import kotlinx.coroutines.delay
+import java.io.File
 ${importLines}
 
 class FractionatorGalleryActivity : ComponentActivity() {
@@ -474,7 +810,7 @@ class FractionatorGalleryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
         setContent {
-            FractionatorGalleryContent(previewId)
+            FractionatorGallery(previewId) { id, bitmap -> saveResult(id, bitmap) }
         }
     }
 
@@ -483,6 +819,63 @@ class FractionatorGalleryActivity : ComponentActivity() {
         setIntent(intent)
         previewId = intent.getStringExtra("fractionator_preview_id") ?: ""
     }
+
+    // Write the component PNG (when one was produced) plus a marker that always
+    // signals completion, so the capture loop can fall back immediately rather
+    // than waiting out a timeout.
+    private fun saveResult(id: String, bitmap: Bitmap?) {
+        try {
+            if (bitmap != null) {
+                File(filesDir, "\$id.png").outputStream().use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            File(filesDir, "\$id.rendered").writeBytes(ByteArray(0))
+        } catch (_: Throwable) {
+        }
+    }
+}
+
+@Composable
+private fun FractionatorGallery(
+    previewId: String,
+    onResult: (String, Bitmap?) -> Unit,
+) {
+    val graphicsLayer = rememberGraphicsLayer()
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier.drawWithContent {
+                graphicsLayer.record { this@drawWithContent.drawContent() }
+                drawLayer(graphicsLayer)
+            }
+        ) {
+            FractionatorGalleryContent(previewId)
+        }
+    }
+
+    LaunchedEffect(previewId) {
+        // Skip the warm-up / empty ids — nothing to capture.
+        if (previewId.isEmpty() || previewId.startsWith("__fractionator")) {
+            return@LaunchedEffect
+        }
+        // Let the recomposition settle before recording the layer.
+        delay(500)
+        val bitmap = try {
+            graphicsLayer.toImageBitmap().asAndroidBitmap()
+        } catch (e: Throwable) {
+            Log.e("Fractionator", "capture failed for \$previewId", e)
+            null
+        }
+        // Drop a blank/uniform capture — a GraphicsLayer can't record some content
+        // (WebView, AndroidView, async images), yielding an empty bitmap. Passing
+        // null writes no PNG, so the capture loop falls back to a full-screen
+        // screencap of the displayed preview instead of saving a white box.
+        val result = if (bitmap != null && !isBlankBitmap(bitmap)) bitmap else null
+        onResult(previewId, result)
+    }
 }
 
 @Composable
@@ -490,6 +883,49 @@ private fun FractionatorGalleryContent(previewId: String) {
     when (previewId) {
 ${cases}
         else -> Text("Unknown preview: $previewId")
+    }
+}
+
+// True when the bitmap carries essentially no visible content — every sampled
+// pixel the same colour (a blank or fully-transparent canvas). The content is
+// drawn into a small software bitmap and checked for any colour/alpha variance,
+// so real content stays well clear of the threshold while a uniform canvas is
+// caught. Wrapped so it can never crash the capture: toImageBitmap() yields a
+// Config.HARDWARE bitmap (getPixels() is illegal on those), so we draw it through
+// a Canvas into an ARGB_8888 sample we can read; any failure just keeps the image.
+private fun isBlankBitmap(source: Bitmap): Boolean {
+    return try {
+        val w = minOf(source.width, 32).coerceAtLeast(1)
+        val h = minOf(source.height, 32).coerceAtLeast(1)
+        val sample = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(sample).drawBitmap(
+            source,
+            Rect(0, 0, source.width, source.height),
+            Rect(0, 0, w, h),
+            null,
+        )
+        val pixels = IntArray(w * h)
+        sample.getPixels(pixels, 0, w, 0, 0, w, h)
+        val first = pixels[0]
+        val fa = (first ushr 24) and 0xFF
+        val fr = (first ushr 16) and 0xFF
+        val fg = (first ushr 8) and 0xFF
+        val fb = first and 0xFF
+        var blank = true
+        for (p in pixels) {
+            if (kotlin.math.abs(((p ushr 24) and 0xFF) - fa) > 8 ||
+                kotlin.math.abs(((p ushr 16) and 0xFF) - fr) > 8 ||
+                kotlin.math.abs(((p ushr 8) and 0xFF) - fg) > 8 ||
+                kotlin.math.abs((p and 0xFF) - fb) > 8
+            ) {
+                blank = false
+                break
+            }
+        }
+        blank
+    } catch (_: Throwable) {
+        // Never let the blank check crash the capture; keep the rendered image.
+        false
     }
 }
 `;
@@ -814,6 +1250,102 @@ function isProcessAlive(device, applicationId) {
 }
 
 /**
+ * Whether `run-as <appId>` works on this device — true for debuggable (debug)
+ * builds, which lets us read the gallery's rendered PNGs from the app's private
+ * `files/` directory. Probed once; gates component-only capture.
+ */
+function canRunAs(device, appId) {
+  const res = spawnSync(
+    "adb",
+    ["-s", device, "exec-out", "run-as", appId, "ls"],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+  // `adb exec-out` doesn't propagate the remote exit code, so don't trust
+  // res.status: a working run-as lists the app home dir (non-empty stdout); a
+  // broken one ("unknown package") writes to stderr, leaving stdout empty.
+  return !!res.stdout && res.stdout.trim().length > 0;
+}
+
+/** Delete a preview's stale rendered PNG and completion marker. */
+function clearRendered(device, appId, id) {
+  spawnSync(
+    "adb",
+    [
+      "-s",
+      device,
+      "exec-out",
+      "run-as",
+      appId,
+      "rm",
+      "-f",
+      `files/${id}.png`,
+      `files/${id}.rendered`,
+    ],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+}
+
+/** Whether the gallery's completion marker for a preview exists yet. */
+function markerExists(device, appId, id) {
+  // List the whole files/ dir and look for an exact entry. `ls <missing-file>`
+  // can't be used: through `adb exec-out` it exits 0 and prints its "No such
+  // file" error (which contains the filename) to stdout, so any per-file check
+  // false-matches. A directory listing has no such error text.
+  const res = spawnSync(
+    "adb",
+    ["-s", device, "exec-out", "run-as", appId, "ls", "files"],
+    { encoding: "utf-8", timeout: 10_000 },
+  );
+  if (!res.stdout) return false;
+  return res.stdout.split(/\s+/).includes(`${id}.rendered`);
+}
+
+/** Poll for the completion marker up to a timeout. */
+async function waitForMarker(device, appId, id, timeoutMs, intervalMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (markerExists(device, appId, id)) return true;
+    await sleep(intervalMs);
+  }
+  return markerExists(device, appId, id);
+}
+
+/**
+ * Copy the gallery's rendered component PNG out of the app's private files via
+ * `run-as` (binary-clean through `exec-out`). Returns true if one was written.
+ */
+function pullRendered(device, appId, id, destFile) {
+  const res = spawnSync(
+    "adb",
+    ["-s", device, "exec-out", "run-as", appId, "cat", `files/${id}.png`],
+    { timeout: 15_000, maxBuffer: 64 * 1024 * 1024 },
+  );
+  // Validate the PNG signature — `cat` of a missing file (or any error) prints
+  // text to stdout that adb doesn't distinguish from a real payload, so a
+  // length check alone would write garbage and report success.
+  const out = res.stdout;
+  if (res.status === 0 && out && out.length > 8 && isPng(out)) {
+    fs.writeFileSync(destFile, out);
+    return true;
+  }
+  return false;
+}
+
+/** Whether a Buffer starts with the 8-byte PNG signature. */
+function isPng(buf) {
+  return (
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a
+  );
+}
+
+/**
  * Run an adb command targeting a specific device.
  */
 function adb(device, args) {
@@ -958,4 +1490,10 @@ function sanitize(id) {
   return String(id).replace(/[^a-zA-Z0-9]/g, "_").slice(0, 200);
 }
 
-module.exports = { captureAndroidScreenshots };
+module.exports = {
+  captureAndroidScreenshots,
+  analyzeKotlinPreviews,
+  // Exported for unit tests.
+  extractPreviewFunctionRecords,
+  detectRenderedComponents,
+};

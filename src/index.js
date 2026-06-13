@@ -14,8 +14,14 @@ const {
 const { scanUsages } = require("./usage-scanner");
 const { groupVariants } = require("./variant-grouper");
 const { buildReport } = require("./build-report");
-const { captureComponentScreenshots } = require("./swift-screenshot-capture");
-const { captureAndroidScreenshots } = require("./kotlin-screenshot-capture");
+const {
+  captureComponentScreenshots,
+  analyzePreviews,
+} = require("./swift-screenshot-capture");
+const {
+  captureAndroidScreenshots,
+  analyzeKotlinPreviews,
+} = require("./kotlin-screenshot-capture");
 const { matchComponents } = require("./cross-platform-matcher");
 const { generateMappingYaml } = require("./mapping-generator");
 const { loadMapping } = require("./mapping-loader");
@@ -39,7 +45,7 @@ async function generate(options) {
   const { sources, outputDir, formats, componentsDirOverride, includeUnused } =
     options;
 
-  console.log("🧬  Fractionator\n");
+  console.log("🧬 Fractionator\n");
 
   const catalogue = { platforms: {}, tokens: {} };
 
@@ -68,11 +74,18 @@ async function generate(options) {
 
     const variantMap = groupVariants(components, usageMap);
 
-    // Capture screenshots of component previews
-    let screenshotMap = new Map();
+    // Static preview diagnostics (no simulator needed): which previews exist
+    // and, for those we can't capture, why. Drives the report's "no preview" /
+    // "skipped" status so missing previews are explained, not silently absent.
+    const previewDiagnostics = analyzePreviews(components, sources.ios);
+
+    // Capture screenshots of component previews. Keyed by preview id; each entry
+    // carries the preview's `renders` set so we can attribute it to one component
+    // or recognise it as a multi-component showcase.
+    let capturedPreviews = new Map();
     if (!options.noScreenshots && !options.initMapping) {
       try {
-        screenshotMap = await captureComponentScreenshots(
+        capturedPreviews = await captureComponentScreenshots(
           components,
           sources.ios,
           outputDir,
@@ -86,11 +99,42 @@ async function generate(options) {
       console.log("   Screenshots skipped (--no-screenshots)");
     }
 
+    // Attribute captures from their `renders` set: ≥2 components → a showcase
+    // (shown once, linked from each component); 1 (or 0 → name/file fallback) →
+    // that component's own preview.
+    const soloByComponent = new Map();
+    const appearsInByComponent = new Map();
+    const allShowcases = [];
+    for (const prev of capturedPreviews.values()) {
+      const renders = prev.renders || [];
+      if (renders.length >= 2) {
+        allShowcases.push({
+          id: prev.id,
+          name: prev.previewName,
+          sourceFile: prev.sourceFile,
+          renders,
+          screenshots: prev.screenshots,
+        });
+        for (const cn of renders) {
+          const ids = appearsInByComponent.get(cn) || [];
+          ids.push(prev.id);
+          appearsInByComponent.set(cn, ids);
+        }
+      } else {
+        const cn = renders.length === 1 ? renders[0] : prev.fallbackComponent;
+        if (cn) {
+          const shots = soloByComponent.get(cn) || [];
+          shots.push(...prev.screenshots);
+          soloByComponent.set(cn, shots);
+        }
+      }
+    }
+
     // Assemble per-component catalogue entries
     const entries = components.map((comp) => {
       const usages = usageMap.get(comp.name) || [];
       const variants = variantMap.get(comp.name) || [];
-      const screenshots = screenshotMap.get(comp.name) || [];
+      const screenshots = soloByComponent.get(comp.name) || [];
 
       return {
         name: comp.name,
@@ -98,7 +142,9 @@ async function generate(options) {
         relativePath: comp.relativePath,
         signature: comp.signature,
         previews: comp.previews,
+        previewDiagnostics: previewDiagnostics.get(comp.name) || [],
         screenshots,
+        appearsIn: appearsInByComponent.get(comp.name) || [],
         usageCount: usages.length,
         usages: usages.map((u) => ({
           relativePath: u.relativePath,
@@ -129,12 +175,24 @@ async function generate(options) {
       ? entries
       : entries.filter((e) => e.usageCount > 0);
 
+    // A showcase is shown when it renders at least one used component, so a
+    // multi-component preview isn't hidden just because a single owner is unused.
+    const usedComponentNames = new Set(
+      entries.filter((e) => e.usageCount > 0).map((e) => e.name),
+    );
+    const visibleShowcases = includeUnused
+      ? allShowcases
+      : allShowcases.filter((s) =>
+          s.renders.some((r) => usedComponentNames.has(r)),
+        );
+
     catalogue.platforms.ios = {
       projectPath: sources.ios,
       componentCount: components.length,
       usedCount: entries.filter((e) => e.usageCount > 0).length,
       unusedCount: entries.filter((e) => e.usageCount === 0).length,
       components: filtered,
+      showcases: visibleShowcases,
     };
 
     // Design tokens — colors, type sizes, spacing — across all Swift files.
@@ -190,11 +248,21 @@ async function generate(options) {
 
     const androidVariantMap = groupVariants(androidComponents, androidUsageMap);
 
-    // Capture screenshots of component previews
-    let androidScreenshotMap = new Map();
+    // Static preview diagnostics (no emulator needed): which previews exist and,
+    // for those we can't capture, why. Drives the report's "no preview" /
+    // "skipped" status so missing previews are explained, not silently absent.
+    const androidPreviewDiagnostics = analyzeKotlinPreviews(
+      androidComponents,
+      sources.android,
+    );
+
+    // Capture screenshots of component previews. Keyed by preview id; each entry
+    // carries the preview's `renders` set so we can attribute it to one component
+    // or recognise it as a multi-component showcase.
+    let capturedPreviews = new Map();
     if (!options.noScreenshots && !options.initMapping) {
       try {
-        androidScreenshotMap = await captureAndroidScreenshots(
+        capturedPreviews = await captureAndroidScreenshots(
           androidComponents,
           sources.android,
           outputDir,
@@ -208,11 +276,43 @@ async function generate(options) {
       console.log("   Screenshots skipped (--no-screenshots)");
     }
 
+    // Attribute captures from their `renders` set: a preview rendering ≥2 known
+    // components becomes a showcase (shown once, linked from each component); one
+    // rendering a single component (or none — falling back to the name heuristic)
+    // becomes that component's own preview.
+    const soloByComponent = new Map(); // name → screenshot[]
+    const appearsInByComponent = new Map(); // name → showcaseId[]
+    const allShowcases = [];
+    for (const prev of capturedPreviews.values()) {
+      const renders = prev.renders || [];
+      if (renders.length >= 2) {
+        allShowcases.push({
+          id: prev.id,
+          name: prev.previewName,
+          sourceFile: prev.sourceFile,
+          renders,
+          screenshots: prev.screenshots,
+        });
+        for (const cn of renders) {
+          const ids = appearsInByComponent.get(cn) || [];
+          ids.push(prev.id);
+          appearsInByComponent.set(cn, ids);
+        }
+      } else {
+        const cn = renders.length === 1 ? renders[0] : prev.fallbackComponent;
+        if (cn) {
+          const shots = soloByComponent.get(cn) || [];
+          shots.push(...prev.screenshots);
+          soloByComponent.set(cn, shots);
+        }
+      }
+    }
+
     // Assemble per-component catalogue entries
     const androidEntries = androidComponents.map((comp) => {
       const usages = androidUsageMap.get(comp.name) || [];
       const variants = androidVariantMap.get(comp.name) || [];
-      const screenshots = androidScreenshotMap.get(comp.name) || [];
+      const screenshots = soloByComponent.get(comp.name) || [];
 
       return {
         name: comp.name,
@@ -220,7 +320,9 @@ async function generate(options) {
         relativePath: comp.relativePath,
         signature: comp.signature,
         previews: comp.previews,
+        previewDiagnostics: androidPreviewDiagnostics.get(comp.name) || [],
         screenshots,
+        appearsIn: appearsInByComponent.get(comp.name) || [],
         overloads: comp.overloads || 1,
         usageCount: usages.length,
         usages: usages.map((u) => ({
@@ -252,12 +354,25 @@ async function generate(options) {
       ? androidEntries
       : androidEntries.filter((e) => e.usageCount > 0);
 
+    // A showcase is shown when it renders at least one used component (so a
+    // multi-component preview isn't hidden just because its old single owner was
+    // unused) — unless unused components are being included anyway.
+    const usedComponentNames = new Set(
+      androidEntries.filter((e) => e.usageCount > 0).map((e) => e.name),
+    );
+    const visibleShowcases = includeUnused
+      ? allShowcases
+      : allShowcases.filter((s) =>
+          s.renders.some((r) => usedComponentNames.has(r)),
+        );
+
     catalogue.platforms.android = {
       projectPath: sources.android,
       componentCount: androidComponents.length,
       usedCount: androidEntries.filter((e) => e.usageCount > 0).length,
       unusedCount: androidEntries.filter((e) => e.usageCount === 0).length,
       components: androidFiltered,
+      showcases: visibleShowcases,
     };
 
     // Design tokens — colors, type sizes, spacing — across all Kotlin files.
@@ -322,7 +437,7 @@ async function generate(options) {
   // --- Build output ---
   console.log(`\nWriting output to ${outputDir}`);
   buildReport(catalogue, outputDir, formats);
-  console.log("\nDone.");
+  console.log("\n🎨 Done.");
 
   // Open the HTML report in the default browser, unless suppressed.
   if (formats.includes("html") && options.open !== false) {

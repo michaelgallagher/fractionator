@@ -2,7 +2,10 @@ const { execSync, spawnSync } = require("child_process");
 const { globSync } = require("glob");
 const path = require("path");
 const fs = require("fs");
-const { extractBraceBlock } = require("./swift-component-scanner");
+const {
+  extractBraceBlock,
+  stripSwiftComments,
+} = require("./swift-component-scanner");
 const { MODES, screenshotFilename } = require("./variation-modes");
 
 // Sentinel comment so we can detect our own injections
@@ -28,7 +31,9 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  * @param {number} [options.settleMs=1500] - ms to wait after launch
  * @param {string[]} [options.modes=["baseline"]] - display-trait modes to
  *   capture each preview under (see variation-modes.js)
- * @returns {Map<string, string[]>} componentName → [screenshot relative paths]
+ * @returns {Map<string, object>} previewId → { id, previewName, sourceFile,
+ *   renders, fallbackComponent, screenshots: [{ path, mode, ... }] }. Attribution
+ *   to components/showcases is done downstream from `renders`.
  */
 async function captureComponentScreenshots(
   components,
@@ -152,6 +157,24 @@ async function captureComponentScreenshots(
       "0",
     ]);
 
+    // Locate the app's data container so we can collect the component-sized PNGs
+    // the gallery writes to Documents. If this fails we fall back to full-screen
+    // captures for every preview.
+    let dataContainer = null;
+    try {
+      dataContainer = run("xcrun", [
+        "simctl",
+        "get_app_container",
+        simulator.udid,
+        bundleId,
+        "data",
+      ]).trim();
+    } catch (err) {
+      console.warn(
+        `   ⚠️  Could not locate app data container (${err.message}); using full-screen captures`,
+      );
+    }
+
     // 6. Screenshot loop. Display-trait modes are the outer loop: each mode is
     // applied once as a global override (no rebuild), then every preview is
     // captured under it. Baseline trait values are snapshotted first so the
@@ -174,6 +197,7 @@ async function captureComponentScreenshots(
         const ok = await captureOneIosPreview(
           simulator.udid,
           bundleId,
+          dataContainer,
           preview,
           modeId,
           screenshotsDir,
@@ -215,12 +239,20 @@ async function captureComponentScreenshots(
 
 /**
  * Capture a single preview under the already-applied display mode.
- * Terminates any running instance, launches the gallery on the preview id,
- * settles, screenshots, and records the result. Returns true on success.
+ *
+ * Prefers the component-sized PNG the gallery renders via `ImageRenderer` (pulled
+ * from the app's Documents directory); falls back to a full-screen `simctl io`
+ * capture when no rendered image appears — e.g. previews `ImageRenderer` can't
+ * render (sheets, async content) or runtimes earlier than iOS 16.
+ *
+ * Terminates any running instance, clears any stale rendered file, launches the
+ * gallery on the preview id, settles, collects the result, and records it.
+ * Returns true on success.
  */
 async function captureOneIosPreview(
   udid,
   bundleId,
+  dataContainer,
   preview,
   modeId,
   screenshotsDir,
@@ -231,6 +263,25 @@ async function captureOneIosPreview(
   spawnSync("xcrun", ["simctl", "terminate", udid, bundleId], {
     encoding: "utf-8",
   });
+
+  // The gallery writes `<id>.png` (the component image, if it rendered) and
+  // always `<id>.rendered` (a completion marker) into Documents. Clear any stale
+  // copies first so their presence unambiguously reflects this launch.
+  const renderedSrc = dataContainer
+    ? path.join(dataContainer, "Documents", `${preview.id}.png`)
+    : null;
+  const markerSrc = dataContainer
+    ? path.join(dataContainer, "Documents", `${preview.id}.rendered`)
+    : null;
+  for (const stale of [renderedSrc, markerSrc]) {
+    if (stale && fs.existsSync(stale)) {
+      try {
+        fs.unlinkSync(stale);
+      } catch {
+        // non-fatal
+      }
+    }
+  }
 
   // Launch with gallery arg
   const launchResult = spawnSync(
@@ -246,37 +297,78 @@ async function captureOneIosPreview(
     return false;
   }
 
-  // Settle
-  await sleep(settleMs);
-
-  // Capture
+  // Wait for the gallery to finish (the marker), polling rather than assuming a
+  // fixed delay — cold-start time varies. Once the marker appears, the render
+  // attempt is complete, so we can decide immediately. If it never appears (no
+  // data container, or pre-iOS 16), settle and fall back to a screenshot.
   const filename = screenshotFilename(sanitize(preview.id), modeId);
   const destFile = path.join(screenshotsDir, filename);
-  const shotResult = spawnSync(
-    "xcrun",
-    ["simctl", "io", udid, "screenshot", destFile],
-    { encoding: "utf-8", timeout: 10_000 },
-  );
 
-  if (
-    shotResult.status === 0 &&
-    fs.existsSync(destFile) &&
-    fs.statSync(destFile).size > 0
-  ) {
-    const existing = screenshotMap.get(preview.componentName) || [];
-    existing.push({
-      path: `screenshots/${filename}`,
-      previewName: preview.previewName,
-      id: preview.id,
-      mode: modeId,
-      modeLabel: MODES[modeId].label,
-    });
-    screenshotMap.set(preview.componentName, existing);
-    return true;
+  const done = markerSrc
+    ? await waitForFile(markerSrc, settleMs + 5000, 150)
+    : false;
+  if (!done) {
+    await sleep(settleMs);
   }
 
-  console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
-  return false;
+  // Prefer the component-only image the gallery rendered.
+  let cropped = false;
+  if (
+    renderedSrc &&
+    fs.existsSync(renderedSrc) &&
+    fs.statSync(renderedSrc).size > 0
+  ) {
+    try {
+      fs.copyFileSync(renderedSrc, destFile);
+      cropped = true;
+    } catch {
+      // fall through to full-screen capture
+    }
+  }
+
+  // Fall back to a full-screen capture of the displayed preview.
+  if (!cropped) {
+    const shotResult = spawnSync(
+      "xcrun",
+      ["simctl", "io", udid, "screenshot", destFile],
+      { encoding: "utf-8", timeout: 10_000 },
+    );
+    if (
+      !(
+        shotResult.status === 0 &&
+        fs.existsSync(destFile) &&
+        fs.statSync(destFile).size > 0
+      )
+    ) {
+      console.warn(`   ⚠️  Screenshot failed for ${preview.id} [${modeId}]`);
+      return false;
+    }
+  }
+
+  // Record by preview id. Attribution to components/showcases happens downstream
+  // from the preview's `renders` set, so one capture can belong to several
+  // components (a showcase) without being duplicated.
+  let rec = screenshotMap.get(preview.id);
+  if (!rec) {
+    rec = {
+      id: preview.id,
+      previewName: preview.previewName,
+      sourceFile: preview.sourceFile,
+      renders: preview.renders || [],
+      fallbackComponent: preview.fallbackComponent || null,
+      screenshots: [],
+    };
+    screenshotMap.set(preview.id, rec);
+  }
+  rec.screenshots.push({
+    path: `screenshots/${filename}`,
+    previewName: preview.previewName,
+    id: preview.id,
+    mode: modeId,
+    modeLabel: MODES[modeId].label,
+    cropped,
+  });
+  return true;
 }
 
 /**
@@ -323,31 +415,96 @@ function applyIosMode(udid, traits) {
 // ---------------------------------------------------------------------------
 
 /**
- * Extract #Preview block bodies from all component source files.
- * Returns [{ id, componentName, previewName, body }]
+ * Extract capturable #Preview blocks across all component files, preview-centric.
+ * Each file is processed once; a preview's `renders` set (the known components its
+ * body constructs) drives attribution downstream — one component, several (a
+ * showcase), or none (the name/file fallback).
+ *
+ * Returns [{ id, previewName, body, wrapper, renders, fallbackComponent,
+ * sourceFile }].
  */
 function extractAllPreviews(components, projectPath) {
-  const previews = [];
+  const componentNames = new Set(components.map((c) => c.name));
 
+  // Group components by file so a file shared by several components is read once
+  // (and a preview isn't duplicated across them).
+  const fileMap = new Map(); // filePath → [component, ...]
   for (const comp of components) {
-    const content = fs.readFileSync(comp.filePath, "utf-8");
-    const compPreviews = extractPreviewBlocks(content, comp.name);
-    previews.push(...compPreviews);
+    const arr = fileMap.get(comp.filePath) || [];
+    arr.push(comp);
+    fileMap.set(comp.filePath, arr);
+  }
+
+  const previews = [];
+  const seenIds = new Set();
+
+  for (const [filePath, fileComponents] of fileMap) {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const relativePath = path.relative(projectPath, filePath);
+    const fileStem = path.basename(filePath, ".swift");
+    // The file's namesake component (or its first) backs previews that render no
+    // known component — e.g. a whole-screen preview.
+    const fallback =
+      fileComponents.find((c) => c.name === fileStem) || fileComponents[0];
+
+    const records = extractPreviewRecords(content).filter((r) => !r.skip);
+    for (const rec of records) {
+      let id = sanitize(`${fileStem}_${rec.previewName}`);
+      if (seenIds.has(id)) {
+        let n = 2;
+        while (seenIds.has(`${id}_${n}`)) n++;
+        id = `${id}_${n}`;
+      }
+      seenIds.add(id);
+
+      previews.push({
+        id,
+        previewName: rec.previewName,
+        body: rec.body,
+        wrapper: rec.wrapper,
+        renders: detectRenderedComponents(rec.body, componentNames, null),
+        fallbackComponent: fallback ? fallback.name : null,
+        sourceFile: relativePath,
+      });
+    }
   }
 
   return previews;
 }
 
 /**
- * Extract all #Preview { ... } blocks from a file.
- * Returns [{ id, componentName, previewName, body }]
- *
- * Skips previews that:
- * - Use @Previewable (state macro that can't be extracted)
- * - Have bare return statements
- * - Reference private/fileprivate types from the same file
+ * The set of known component names a #Preview body constructs — its real
+ * subjects. SwiftUI components are used as `Name(...)`, so we match `Name(`
+ * against the known component names, after stripping comments/strings so a name
+ * in a comment or string literal doesn't false-match.
  */
-function extractPreviewBlocks(content, componentName) {
+function detectRenderedComponents(body, componentNames, selfName) {
+  if (!body) return [];
+  const stripped = stripSwiftComments(body).replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  const found = [];
+  for (const name of componentNames) {
+    if (name === selfName) continue;
+    if (new RegExp(`\\b${escapeRegExp(name)}\\s*\\(`).test(stripped)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
+
+/** Escape a string for safe use inside a RegExp. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Extract all #Preview { ... } blocks from a file, with a skip classification.
+ * Returns [{ previewName, body, wrapper, skip }] where:
+ *  - `skip` is null for capturable previews, or a short human-readable reason;
+ *  - `wrapper` is non-null for `@Previewable @State` previews we can capture by
+ *    hoisting the state into a generated wrapper View (see parsePreviewableState).
+ * Identity and component attribution are assigned by the caller from the body.
+ */
+function extractPreviewRecords(content) {
   const results = [];
 
   // Collect names of private/fileprivate types in this file so we can
@@ -370,50 +527,163 @@ function extractPreviewBlocks(content, componentName) {
     const body = block.content.trim();
     if (!body) continue;
 
-    // Skip previews that use @Previewable — these declare @State inside
-    // the preview block, which is a Swift macro that doesn't work when
-    // the body is wrapped in AnyView() or extracted into a different context.
-    if (body.includes("@Previewable")) continue;
+    let wrapper = null;
+    let skip = null;
 
-    // Skip previews with bare `return` statements — these are multi-statement
-    // preview bodies that can't be wrapped in AnyView().
-    if (/^\s*return\s/m.test(body)) continue;
-
-    // Skip previews that reference `$` bindings (likely from @Previewable @State)
-    // but check it's not just a string interpolation
-    if (/\$\w+/.test(body) && !body.includes("\\(")) {
-      // Might have binding references — check if there's a @State elsewhere
-      // in the file near this preview
-      const nearbyContent = content.slice(
-        Math.max(0, match.index - 200),
-        match.index,
-      );
-      if (/@Previewable|@State/.test(nearbyContent)) continue;
+    if (body.includes("@Previewable")) {
+      // `@Previewable @State` declares preview-local state. The macro can't be
+      // lifted into AnyView() in another file, but we can hoist the declarations
+      // into a generated wrapper View whose real @State backs the $bindings.
+      const parsed = parsePreviewableState(body);
+      if (parsed) {
+        wrapper = parsed;
+      } else {
+        skip = "interactive preview (@Previewable state)";
+      }
+    } else {
+      skip = classifyPreviewSkip(body, content, match.index, privateTypes);
     }
 
-    // Skip previews that reference private/fileprivate types — these are
-    // inaccessible from FractionatorGallery.swift (a different file).
-    if (privateTypes.length > 0) {
-      const usesPrivateType = privateTypes.some((name) => {
-        // Look for the type name used as a constructor call or type reference
-        const re = new RegExp(`\\b${name}\\b`);
-        return re.test(body);
-      });
-      if (usesPrivateType) continue;
+    // A private/fileprivate type is inaccessible from the gallery file whether or
+    // not we wrap the preview — so re-check and override the wrapper.
+    if (wrapper && referencesPrivateType(body, privateTypes)) {
+      wrapper = null;
+      skip = "references a private type";
     }
 
-    // Create a unique ID
-    const id = `${componentName}_${sanitize(previewName)}`;
-
-    results.push({
-      id,
-      componentName,
-      previewName,
-      body,
-    });
+    results.push({ previewName, body, wrapper, skip });
   }
 
   return results;
+}
+
+/**
+ * Decide whether a (non-@Previewable) #Preview body can be relocated into
+ * FractionatorGallery.swift and captured. Returns null when it can, or a short
+ * reason when it can't — the reason is surfaced in the report so a missing
+ * preview is explained rather than silently absent.
+ */
+function classifyPreviewSkip(body, content, matchIndex, privateTypes) {
+  // Bare `return` means a multi-statement body that can't be wrapped in AnyView().
+  if (/^\s*return\s/m.test(body)) {
+    return "multi-statement preview (uses return)";
+  }
+
+  // `$` bindings (likely from @Previewable @State) — but ignore string
+  // interpolation. Confirm by looking for nearby @State / @Previewable.
+  if (/\$\w+/.test(body) && !body.includes("\\(")) {
+    const nearbyContent = content.slice(Math.max(0, matchIndex - 200), matchIndex);
+    if (/@Previewable|@State/.test(nearbyContent)) {
+      return "interactive preview (state binding)";
+    }
+  }
+
+  // private/fileprivate types are inaccessible from the generated gallery file.
+  if (referencesPrivateType(body, privateTypes)) {
+    return "references a private type";
+  }
+
+  return null;
+}
+
+/** True when a preview body uses any of the file's private/fileprivate types. */
+function referencesPrivateType(body, privateTypes) {
+  return privateTypes.some((name) => new RegExp(`\\b${name}\\b`).test(body));
+}
+
+/**
+ * Parse a `@Previewable @State` preview body into the pieces needed to build a
+ * wrapper View: the hoisted property declarations and the remaining view body.
+ *
+ * Returns `{ stateDecls: string[], viewBody: string }`, or null when the body
+ * can't be transformed safely — in which case the caller skips it as before. The
+ * checks are deliberately conservative: a malformed wrapper would fail to compile
+ * and take the whole gallery build (and every screenshot) down with it, so
+ * anything unfamiliar bails rather than guesses.
+ */
+function parsePreviewableState(body) {
+  const lines = body.split("\n");
+  const stateDecls = [];
+  const bodyLines = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("@Previewable")) {
+      bodyLines.push(line);
+      continue;
+    }
+    // Strip the @Previewable attribute; what's left is an ordinary stored
+    // property the wrapper View can declare.
+    const decl = trimmed.replace(/^@Previewable\s+/, "");
+    // Only accept known property wrappers on a single, balanced line. A
+    // multi-line initializer would split across our line filter and break.
+    if (
+      !/^@(State|StateObject|Bindable|Environment|AppStorage|SceneStorage|FocusState)\b/.test(
+        decl,
+      ) ||
+      !isBalancedLine(decl)
+    ) {
+      return null;
+    }
+    stateDecls.push(decl);
+  }
+
+  if (stateDecls.length === 0) return null;
+  const viewBody = bodyLines.join("\n").trim();
+  if (!viewBody) return null;
+
+  return { stateDecls, viewBody };
+}
+
+/**
+ * Conservative balance check: parens/brackets/braces matched and quotes paired,
+ * ignoring delimiters inside string literals. Used to reject multi-line
+ * declarations we shouldn't try to hoist onto a single line.
+ */
+function isBalancedLine(line) {
+  let paren = 0,
+    bracket = 0,
+    brace = 0,
+    quotes = 0;
+  for (const ch of line) {
+    if (ch === '"') {
+      quotes++;
+    } else if (quotes % 2 === 0) {
+      if (ch === "(") paren++;
+      else if (ch === ")") paren--;
+      else if (ch === "[") bracket++;
+      else if (ch === "]") bracket--;
+      else if (ch === "{") brace++;
+      else if (ch === "}") brace--;
+    }
+  }
+  return paren === 0 && bracket === 0 && brace === 0 && quotes % 2 === 0;
+}
+
+/**
+ * Static analysis of every component's previews — which exist and, for those we
+ * can't capture, why. Needs no simulator, so the report can explain missing
+ * previews even when screenshot capture is skipped or fails.
+ *
+ * @returns {Map<string, {previewName: string, skip: string|null}[]>}
+ *   componentName → one entry per #Preview found in its source file.
+ */
+function analyzePreviews(components, projectPath) {
+  const map = new Map();
+  for (const comp of components) {
+    let content;
+    try {
+      content = fs.readFileSync(comp.filePath, "utf-8");
+    } catch {
+      continue;
+    }
+    const records = extractPreviewRecords(content);
+    map.set(
+      comp.name,
+      records.map((r) => ({ previewName: r.previewName, skip: r.skip })),
+    );
+  }
+  return map;
 }
 
 /**
@@ -437,32 +707,166 @@ function collectPrivateTypes(content) {
 /**
  * Generate FractionatorGallery.swift — a single file containing all preview
  * bodies as cases in a switch, selectable via launch argument.
+ *
+ * The selected preview is both displayed (so the full-screen capture fallback
+ * still works) and rendered to a component-sized PNG via `ImageRenderer`, which
+ * sizes to the view's intrinsic content — no device chrome, no whitespace. The
+ * render honours the live colour scheme and Dynamic Type size so mode variations
+ * (dark, type) are reproduced; `ImageRenderer` otherwise renders in a detached,
+ * default environment. The PNG is written to the app's Documents directory under
+ * the preview id, where the capture loop collects it.
+ *
+ * `@Previewable @State` previews can't be inlined into AnyView() — the macro is
+ * preview-only. Those carry a `wrapper` (see parsePreviewableState): we emit a
+ * dedicated View struct that declares real @State for the hoisted bindings, and
+ * the switch case instantiates it instead of inlining the body.
  */
 function generateGallerySource(previews) {
+  const wrappers = [];
+
   const cases = previews
-    .map(
-      (p) => `        case "${p.id}":
+    .map((p) => {
+      if (p.wrapper) {
+        const structName = `FractionatorPreview_${sanitize(p.id)}`;
+        wrappers.push(generateWrapperStruct(structName, p.wrapper));
+        return `        case "${p.id}":
+            AnyView(${structName}())`;
+      }
+      return `        case "${p.id}":
             AnyView(
                 ${indentBody(p.body, 16)}
-            )`,
-    )
+            )`;
+    })
     .join("\n");
+
+  const wrapperSource = wrappers.length ? `\n${wrappers.join("\n\n")}\n` : "";
 
   return `${SENTINEL}
 import SwiftUI
-
+import UIKit
+${wrapperSource}
 struct FractionatorGallery: View {
     let previewId: String
+    @Environment(\\.displayScale) private var displayScale
+    @Environment(\\.colorScheme) private var colorScheme
+    @Environment(\\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        switch previewId {
+        previewContent(previewId)
+            .task {
+                // Let the view settle (async loads, layout) before rendering.
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                renderToFile(previewId)
+                // Always signal completion — present whether or not a PNG was
+                // produced — so the capture loop can fall back immediately
+                // instead of waiting out a timeout.
+                writeMarker(previewId)
+            }
+    }
+
+    @ViewBuilder
+    private func previewContent(_ id: String) -> some View {
+        switch id {
 ${cases}
         default:
-            AnyView(Text("Unknown preview: \\(previewId)"))
+            AnyView(Text("Unknown preview: \\(id)"))
         }
+    }
+
+    @MainActor
+    private func renderToFile(_ id: String) {
+        guard #available(iOS 16.0, *) else { return }
+        let content = previewContent(id)
+            .environment(\\.colorScheme, colorScheme)
+            .environment(\\.dynamicTypeSize, dynamicTypeSize)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = displayScale
+
+        // First pass: let the view size to its own ideal dimensions, so
+        // tightly-sized components stay tightly cropped.
+        var image = renderer.uiImage
+        // Retry, only on failure: propose a phone-width so width-greedy views
+        // (.frame(maxWidth: .infinity)) can resolve. Additive — this never runs
+        // for a preview the ideal-size pass already rendered. A blank image
+        // counts as a failure here too: some containers (notably ScrollView)
+        // render a correctly-sized but empty canvas, which we'd rather retry —
+        // and ultimately reject — than mistake for a real crop.
+        if image == nil || isBlank(image!) {
+            renderer.proposedSize = ProposedViewSize(width: 390, height: nil)
+            image = renderer.uiImage
+        }
+
+        // Skip writing a blank render: ImageRenderer can't rasterize some views
+        // (e.g. ScrollView content) and returns a non-nil but empty image. By
+        // not writing the PNG we let the capture loop fall back to a full-screen
+        // screenshot, which shows the live-rendered preview instead of a white box.
+        guard let image, !isBlank(image),
+              let data = image.pngData(),
+              let docs = FileManager.default.urls(
+                  for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        try? data.write(to: docs.appendingPathComponent(id + ".png"))
+    }
+
+    /// True when the rendered image carries essentially no visible content —
+    /// every pixel the same colour (a white or fully-transparent canvas). The
+    /// image is downscaled into a small bitmap and checked for any colour
+    /// variance, so real content (glyphs, buttons, text) stays well clear of the
+    /// threshold while a uniform canvas is reliably caught.
+    private func isBlank(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage, cg.width > 0, cg.height > 0 else { return true }
+        let w = min(cg.width, 32)
+        let h = min(cg.height, 32)
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: w * 4, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        // Compare every sampled pixel against the first; any meaningful colour
+        // or alpha difference means there's something to show.
+        let r0 = pixels[0], g0 = pixels[1], b0 = pixels[2], a0 = pixels[3]
+        var i = 0
+        while i < pixels.count {
+            if abs(Int(pixels[i]) - Int(r0)) > 8 ||
+               abs(Int(pixels[i + 1]) - Int(g0)) > 8 ||
+               abs(Int(pixels[i + 2]) - Int(b0)) > 8 ||
+               abs(Int(pixels[i + 3]) - Int(a0)) > 8 {
+                return false
+            }
+            i += 4
+        }
+        return true
+    }
+
+    private func writeMarker(_ id: String) {
+        guard let docs = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        try? Data().write(to: docs.appendingPathComponent(id + ".rendered"))
     }
 }
 `;
+}
+
+/**
+ * Generate a wrapper View struct for a `@Previewable @State` preview: the hoisted
+ * declarations become real stored properties, and the remaining preview content
+ * becomes the @ViewBuilder body so its $bindings resolve against that state.
+ */
+function generateWrapperStruct(structName, wrapper) {
+  const decls = wrapper.stateDecls.map((d) => `    ${d}`).join("\n");
+  return `struct ${structName}: View {
+${decls}
+
+    @ViewBuilder
+    var body: some View {
+        ${indentBody(wrapper.viewBody, 8)}
+    }
+}`;
 }
 
 /**
@@ -604,6 +1008,20 @@ function findSourceDir(projectPath) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll for a file to exist, up to a timeout. Returns true once it appears.
+ * Used for the gallery's completion marker, which is written only after the
+ * component PNG, so its presence means any PNG is fully written.
+ */
+async function waitForFile(filePath, timeoutMs, intervalMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) return true;
+    await sleep(intervalMs);
+  }
+  return fs.existsSync(filePath);
 }
 
 function sanitize(id) {
@@ -761,4 +1179,9 @@ function extractBundleId(appPath) {
   }
 }
 
-module.exports = { captureComponentScreenshots };
+module.exports = {
+  captureComponentScreenshots,
+  analyzePreviews,
+  // Exported for unit tests.
+  detectRenderedComponents,
+};
