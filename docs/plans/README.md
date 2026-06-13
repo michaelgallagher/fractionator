@@ -8,6 +8,7 @@ to [`archive/`](archive/) once shipped, kept for the design rationale.
 | Plan | Status | Summary |
 |------|--------|---------|
 | [component-catalogue.md](component-catalogue.md) | Core shipped; web/Nunjucks pending | The master plan: scan native + web prototypes, detect components/usages/variants, capture previews, and output a cross-platform catalogue. SwiftUI and Compose are built; the Nunjucks/web path is not. |
+| [accessible-report.md](accessible-report.md) | In progress | Make the generated HTML report meet WCAG 2.2 AA (keyboard, focus, labels, APG tabs, motion, landmarks) and adopt [A11Y.md](https://github.com/fecarrico/A11Y.md) as the project's durable accessibility standard under `docs/a11y/`. |
 
 ## Done (archived)
 
