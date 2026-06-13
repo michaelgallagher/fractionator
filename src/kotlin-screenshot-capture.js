@@ -55,8 +55,9 @@ async function captureAndroidScreenshots(
     console.log("   No capturable @Preview functions found — skipping screenshots");
     return new Map();
   }
+  const skippedCount = countSkippedKotlinPreviews(components);
   console.log(
-    `   Found ${previews.length} capturable preview functions (${previews.length + countPrivatePreviews(components)} total, ${countPrivatePreviews(components)} private/skipped)`,
+    `   Found ${previews.length} capturable preview functions (${previews.length + skippedCount} total, ${skippedCount} private/parameterized/skipped)`,
   );
 
   // 2. Detect project structure
@@ -383,75 +384,251 @@ function matchPreviewToComponent(previewFunctionName, components, filePath) {
 }
 
 /**
- * Count private preview functions across all component files (for reporting).
+ * Count preview functions we skip across all component files (for reporting).
  * Deduplicates by file path to avoid counting the same file multiple times
  * when it contains multiple components.
  */
-function countPrivatePreviews(components) {
+function countSkippedKotlinPreviews(components) {
   const seen = new Set();
   let count = 0;
   for (const comp of components) {
     if (seen.has(comp.filePath)) continue;
     seen.add(comp.filePath);
-    const content = fs.readFileSync(comp.filePath, "utf-8");
-    const pattern =
-      /@Preview\b(?:\s*\([^)]*\))?\s*@Composable\s+private\s+fun\s+\w+/g;
-    while (pattern.exec(content) !== null) count++;
+    let content;
+    try {
+      content = fs.readFileSync(comp.filePath, "utf-8");
+    } catch {
+      continue;
+    }
+    const pkg = extractPackageName(content) || "";
+    for (const rec of extractPreviewFunctionRecords(content, pkg)) {
+      if (rec.skip) count++;
+    }
   }
   return count;
 }
 
 /**
- * Extract @Preview @Composable function declarations from a single file.
- *
- * Skips private/internal functions (inaccessible from the gallery activity).
- *
- * Returns [{ previewName, functionName, packageName }]
- * (componentName and id are set later by matchPreviewToComponent)
+ * Extract every @Preview @Composable function in a file, with a skip
+ * classification. Returns [{ previewName, functionName, packageName, skip }]
+ * where `skip` is null for capturable previews or a short reason otherwise.
+ * (componentName and id are assigned later by matchPreviewToComponent.)
  */
-function extractPreviewFunctions(content, packageName) {
+function extractPreviewFunctionRecords(content, packageName) {
   const results = [];
 
-  // Match @Preview followed by @Composable fun (with optional params/modifiers)
-  // @Preview can have optional annotation arguments: @Preview(name = "...", ...)
+  // @Preview, then any number of further annotations (e.g. multipreview helpers),
+  // then @Composable fun NAME(. @Preview may carry args: @Preview(name = "...").
   const pattern =
-    /@Preview\b(?:\s*\([^)]*\))?\s*@Composable\s+(?:(private|internal)\s+)?fun\s+(\w+)\s*\(/g;
+    /@Preview\b(?:\s*\([^)]*\))?\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*@Composable\s+(?:(private|internal)\s+)?fun\s+(\w+)\s*\(/g;
   let match;
 
   while ((match = pattern.exec(content)) !== null) {
     const visibility = match[1]; // private, internal, or undefined
     const functionName = match[2];
+    // The match ends on the opening '(' of the parameter list.
+    const params = extractBalancedParens(content, pattern.lastIndex - 1);
+    const previewName = derivePreviewName(match[0], functionName);
+    const skip = classifyKotlinPreviewSkip(visibility, params);
 
-    // Skip private/internal functions — can't be imported by gallery
-    if (visibility === "private" || visibility === "internal") continue;
-
-    // Extract preview name from @Preview annotation
-    const annotationText = match[0];
-    const nameParam = annotationText.match(/name\s*=\s*"([^"]+)"/);
-
-    let previewName;
-    if (nameParam) {
-      previewName = nameParam[1];
-    } else {
-      // Generate a name from the function name
-      const stripped = functionName
-        .replace(/Preview$/, "")
-        .replace(/Dark$/, "");
-      const label = stripped
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-        .trim();
-      previewName = label || "Default";
-    }
-
-    results.push({
-      previewName,
-      functionName,
-      packageName,
-    });
+    results.push({ previewName, functionName, packageName, skip });
   }
 
   return results;
+}
+
+/**
+ * Capturable @Preview functions from a file (skip === null).
+ * Returns [{ previewName, functionName, packageName }].
+ */
+function extractPreviewFunctions(content, packageName) {
+  return extractPreviewFunctionRecords(content, packageName).filter(
+    (r) => !r.skip,
+  );
+}
+
+/**
+ * Decide whether a @Preview function can be called from the generated gallery.
+ * Returns null when it can, or a short reason when it can't.
+ */
+function classifyKotlinPreviewSkip(visibility, params) {
+  // A private top-level fun is file-scoped, so the gallery (a different file)
+  // can't call it. `internal` is module-visible and the gallery lives in the
+  // same module, so those are fine to call — don't skip them.
+  if (visibility === "private") {
+    return "private preview (not visible to the generated gallery)";
+  }
+  // The gallery invokes each preview as `fn()`. A parameter without a default —
+  // including @PreviewParameter providers — makes that call fail to compile,
+  // which would take the whole gallery build (and every screenshot) down. Skip
+  // it rather than emit an uncompilable call.
+  if (params && requiresArguments(params)) {
+    return "parameterized preview (requires arguments the gallery can't supply)";
+  }
+  return null;
+}
+
+/** Derive a human-readable preview name from the annotation or function name. */
+function derivePreviewName(annotationText, functionName) {
+  const nameParam = annotationText.match(/name\s*=\s*"([^"]+)"/);
+  if (nameParam) return nameParam[1];
+  const stripped = functionName.replace(/Preview$/, "").replace(/Dark$/, "");
+  const label = stripped
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .trim();
+  return label || "Default";
+}
+
+/**
+ * Static analysis of every component's @Preview functions — which exist and, for
+ * those we can't capture, why. Needs no emulator, so the report can explain a
+ * missing preview even when capture is skipped or fails.
+ *
+ * @returns {Map<string, {previewName: string, skip: string|null}[]>}
+ *   componentName → one entry per @Preview found, associated to its component the
+ *   same way the capture path associates them.
+ */
+function analyzeKotlinPreviews(components, projectPath) {
+  const fileMap = new Map(); // filePath → [component, ...]
+  for (const comp of components) {
+    const existing = fileMap.get(comp.filePath) || [];
+    existing.push(comp);
+    fileMap.set(comp.filePath, existing);
+  }
+
+  const map = new Map();
+  for (const [filePath, fileComponents] of fileMap) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      continue;
+    }
+    const packageName = extractPackageName(content) || "";
+    for (const rec of extractPreviewFunctionRecords(content, packageName)) {
+      const best = matchPreviewToComponent(
+        rec.functionName,
+        fileComponents,
+        filePath,
+      );
+      const list = map.get(best.name) || [];
+      list.push({ previewName: rec.previewName, skip: rec.skip });
+      map.set(best.name, list);
+    }
+  }
+  return map;
+}
+
+/**
+ * Return the inner text of a balanced parenthesised group starting at
+ * `openIndex` (which must point at the opening '('), ignoring delimiters inside
+ * string literals. Returns "" when no match is found.
+ */
+function extractBalancedParens(content, openIndex) {
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  for (let i = openIndex; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (ch === stringChar && content[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return content.slice(openIndex + 1, i);
+    }
+  }
+  return "";
+}
+
+/**
+ * Whether a Kotlin parameter list has any parameter the gallery can't satisfy by
+ * calling `fn()` — i.e. a parameter with no default value. @PreviewParameter
+ * providers count as required (they have no default), so they're caught here too.
+ */
+function requiresArguments(paramStr) {
+  return splitTopLevel(paramStr).some(
+    (p) => p.trim().length > 0 && !paramHasDefault(p),
+  );
+}
+
+/** Split a parameter list on top-level commas (ignoring nesting and strings). */
+function splitTopLevel(str) {
+  const out = [];
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  let cur = "";
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (inString) {
+      cur += ch;
+      if (ch === stringChar && str[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{" || ch === "<") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ">" && str[i - 1] !== "-") depth--; // '>' but not the '->' arrow
+    if (ch === "," && depth <= 0) {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/** Whether a single parameter declaration carries a default value (`= ...`). */
+function paramHasDefault(param) {
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  for (let i = 0; i < param.length; i++) {
+    const ch = param[i];
+    if (inString) {
+      if (ch === stringChar && param[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{" || ch === "<") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ">" && param[i - 1] !== "-") depth--;
+    else if (ch === "=" && depth <= 0) {
+      const prev = param[i - 1];
+      const next = param[i + 1];
+      // A default assignment '=', not a comparison (==, !=, <=, >=).
+      if (
+        prev !== "=" &&
+        prev !== "!" &&
+        prev !== "<" &&
+        prev !== ">" &&
+        next !== "="
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -503,6 +680,8 @@ package ${targetPackage}
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -593,7 +772,12 @@ private fun FractionatorGallery(
             Log.e("Fractionator", "capture failed for \$previewId", e)
             null
         }
-        onResult(previewId, bitmap)
+        // Drop a blank/uniform capture — a GraphicsLayer can't record some content
+        // (WebView, AndroidView, async images), yielding an empty bitmap. Passing
+        // null writes no PNG, so the capture loop falls back to a full-screen
+        // screencap of the displayed preview instead of saving a white box.
+        val result = if (bitmap != null && !isBlankBitmap(bitmap)) bitmap else null
+        onResult(previewId, result)
     }
 }
 
@@ -602,6 +786,49 @@ private fun FractionatorGalleryContent(previewId: String) {
     when (previewId) {
 ${cases}
         else -> Text("Unknown preview: $previewId")
+    }
+}
+
+// True when the bitmap carries essentially no visible content — every sampled
+// pixel the same colour (a blank or fully-transparent canvas). The content is
+// drawn into a small software bitmap and checked for any colour/alpha variance,
+// so real content stays well clear of the threshold while a uniform canvas is
+// caught. Wrapped so it can never crash the capture: toImageBitmap() yields a
+// Config.HARDWARE bitmap (getPixels() is illegal on those), so we draw it through
+// a Canvas into an ARGB_8888 sample we can read; any failure just keeps the image.
+private fun isBlankBitmap(source: Bitmap): Boolean {
+    return try {
+        val w = minOf(source.width, 32).coerceAtLeast(1)
+        val h = minOf(source.height, 32).coerceAtLeast(1)
+        val sample = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(sample).drawBitmap(
+            source,
+            Rect(0, 0, source.width, source.height),
+            Rect(0, 0, w, h),
+            null,
+        )
+        val pixels = IntArray(w * h)
+        sample.getPixels(pixels, 0, w, 0, 0, w, h)
+        val first = pixels[0]
+        val fa = (first ushr 24) and 0xFF
+        val fr = (first ushr 16) and 0xFF
+        val fg = (first ushr 8) and 0xFF
+        val fb = first and 0xFF
+        var blank = true
+        for (p in pixels) {
+            if (kotlin.math.abs(((p ushr 24) and 0xFF) - fa) > 8 ||
+                kotlin.math.abs(((p ushr 16) and 0xFF) - fr) > 8 ||
+                kotlin.math.abs(((p ushr 8) and 0xFF) - fg) > 8 ||
+                kotlin.math.abs((p and 0xFF) - fb) > 8
+            ) {
+                blank = false
+                break
+            }
+        }
+        blank
+    } catch (_: Throwable) {
+        // Never let the blank check crash the capture; keep the rendered image.
+        false
     }
 }
 `;
@@ -1166,4 +1393,4 @@ function sanitize(id) {
   return String(id).replace(/[^a-zA-Z0-9]/g, "_").slice(0, 200);
 }
 
-module.exports = { captureAndroidScreenshots };
+module.exports = { captureAndroidScreenshots, analyzeKotlinPreviews };

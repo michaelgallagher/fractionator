@@ -18,7 +18,10 @@ const {
   captureComponentScreenshots,
   analyzePreviews,
 } = require("./swift-screenshot-capture");
-const { captureAndroidScreenshots } = require("./kotlin-screenshot-capture");
+const {
+  captureAndroidScreenshots,
+  analyzeKotlinPreviews,
+} = require("./kotlin-screenshot-capture");
 const { matchComponents } = require("./cross-platform-matcher");
 const { generateMappingYaml } = require("./mapping-generator");
 const { loadMapping } = require("./mapping-loader");
@@ -199,6 +202,14 @@ async function generate(options) {
 
     const androidVariantMap = groupVariants(androidComponents, androidUsageMap);
 
+    // Static preview diagnostics (no emulator needed): which previews exist and,
+    // for those we can't capture, why. Drives the report's "no preview" /
+    // "skipped" status so missing previews are explained, not silently absent.
+    const androidPreviewDiagnostics = analyzeKotlinPreviews(
+      androidComponents,
+      sources.android,
+    );
+
     // Capture screenshots of component previews
     let androidScreenshotMap = new Map();
     if (!options.noScreenshots && !options.initMapping) {
@@ -229,6 +240,7 @@ async function generate(options) {
         relativePath: comp.relativePath,
         signature: comp.signature,
         previews: comp.previews,
+        previewDiagnostics: androidPreviewDiagnostics.get(comp.name) || [],
         screenshots,
         overloads: comp.overloads || 1,
         usageCount: usages.length,
@@ -331,7 +343,7 @@ async function generate(options) {
   // --- Build output ---
   console.log(`\nWriting output to ${outputDir}`);
   buildReport(catalogue, outputDir, formats);
-  console.log("\nDone.");
+  console.log("\n🎨 Done.");
 
   // Open the HTML report in the default browser, unless suppressed.
   if (formats.includes("html") && options.open !== false) {
