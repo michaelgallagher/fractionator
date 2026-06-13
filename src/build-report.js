@@ -807,7 +807,7 @@ const CSS = `
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.5; }
-.container { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem; }
+.container { max-width: 1400px; margin: 0 auto; padding: 2rem 1.5rem; }
 
 header { margin-bottom: 2rem; }
 h1 { font-size: 1.75rem; font-weight: 700; }
@@ -977,8 +977,8 @@ select {
 
 /* --- Gallery view --- */
 /* Tile rules are scoped to #components so the detail modal (which clones a card
-   outside #components) renders the full, un-collapsed card. */
-body.view-gallery .container { max-width: 1400px; }
+   outside #components) renders the full, un-collapsed card. The container width
+   is shared with list view (see .container) so toggling never shifts the page. */
 body.view-gallery #components {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
