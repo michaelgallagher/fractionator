@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { MODES, screenshotFilename } = require("./variation-modes");
+const { stripKotlinComments } = require("./kotlin-component-scanner");
 
 // Sentinel comment so we can detect our own injections
 const SENTINEL = "// FRACTIONATOR_INJECTED";
@@ -32,7 +33,9 @@ const SENTINEL = "// FRACTIONATOR_INJECTED";
  *   first launch, which is a cold start and shows the app splash screen
  * @param {string[]} [options.modes=["baseline"]] - display-trait modes to
  *   capture each preview under (see variation-modes.js)
- * @returns {Map<string, object[]>} componentName → [{ path, previewName, id }]
+ * @returns {Map<string, object>} previewId → { id, functionName, previewName,
+ *   sourceFile, renders, fallbackComponent, screenshots: [{ path, mode, ... }] }.
+ *   Attribution to components/showcases is done downstream from `renders`.
  */
 async function captureAndroidScreenshots(
   components,
@@ -251,8 +254,23 @@ async function captureAndroidScreenshots(
           }
         }
 
-        const existing = screenshotMap.get(preview.componentName) || [];
-        existing.push({
+        // Record by preview id. Attribution to components/showcases happens
+        // downstream from the preview's `renders` set, so the same capture can
+        // belong to several components (a showcase) without being duplicated.
+        let rec = screenshotMap.get(preview.id);
+        if (!rec) {
+          rec = {
+            id: preview.id,
+            functionName: preview.functionName,
+            previewName: preview.previewName,
+            sourceFile: preview.sourceFile,
+            renders: preview.renders || [],
+            fallbackComponent: preview.fallbackComponent || null,
+            screenshots: [],
+          };
+          screenshotMap.set(preview.id, rec);
+        }
+        rec.screenshots.push({
           path: `screenshots/${filename}`,
           previewName: preview.previewName,
           id: preview.id,
@@ -260,7 +278,6 @@ async function captureAndroidScreenshots(
           modeLabel: mode.label,
           cropped,
         });
-        screenshotMap.set(preview.componentName, existing);
         captured++;
       }
     }
@@ -294,16 +311,20 @@ async function captureAndroidScreenshots(
 // ---------------------------------------------------------------------------
 
 /**
- * Scan component files for @Preview @Composable functions.
- * Returns [{ id, componentName, previewName, functionName, packageName }]
+ * Scan component files for capturable @Preview @Composable functions.
+ * Returns [{ id, functionName, previewName, packageName, renders,
+ * fallbackComponent, sourceFile }] — one entry per capturable preview.
  *
- * Processes each file only once (to avoid duplicates when multiple components
- * share a file). Associates each preview function with the best-matching
- * component from the same file based on name similarity.
- *
- * Skips private/internal preview functions (can't be imported by the gallery).
+ * Processes each file once. `renders` is the set of known component names the
+ * preview body calls (its real subjects); `fallbackComponent` is the legacy
+ * name/file best-match, used only when a preview renders no known component.
+ * Skips private and parameterised preview functions (see classifyKotlinPreviewSkip).
  */
 function extractAllKotlinPreviews(components, projectPath) {
+  // The full set of known component names — a preview can render components
+  // imported from other files, so attribution is global, not per-file.
+  const componentNames = new Set(components.map((c) => c.name));
+
   // Group components by file to process each file once
   const fileMap = new Map(); // filePath → [component, ...]
   for (const comp of components) {
@@ -313,25 +334,48 @@ function extractAllKotlinPreviews(components, projectPath) {
   }
 
   const previews = [];
+  const seenIds = new Set();
 
   for (const [filePath, fileComponents] of fileMap) {
     const content = fs.readFileSync(filePath, "utf-8");
     const packageName = extractPackageName(content);
     if (!packageName) continue;
 
-    // Extract all preview functions from this file once
-    const filePreviews = extractPreviewFunctions(content, packageName);
+    const relativePath = path.relative(projectPath, filePath);
+    const records = extractPreviewFunctionRecords(
+      content,
+      packageName,
+      componentNames,
+    ).filter((r) => !r.skip);
 
-    // Associate each preview with the best-matching component
-    for (const preview of filePreviews) {
-      const bestMatch = matchPreviewToComponent(
+    for (const preview of records) {
+      // Preview-centric, component-independent id (the gallery imports and calls
+      // the function by name). Deduped so two same-named functions don't collide.
+      let id = sanitize(preview.functionName);
+      if (seenIds.has(id)) {
+        let n = 2;
+        while (seenIds.has(`${id}_${n}`)) n++;
+        id = `${id}_${n}`;
+      }
+      seenIds.add(id);
+
+      // Fallback owner for previews whose body renders no known component
+      // (e.g. a whole-screen preview) — keeps today's name/file heuristic.
+      const fallback = matchPreviewToComponent(
         preview.functionName,
         fileComponents,
         filePath,
       );
-      preview.componentName = bestMatch.name;
-      preview.id = `${bestMatch.name}_${sanitize(preview.previewName)}`;
-      previews.push(preview);
+
+      previews.push({
+        id,
+        functionName: preview.functionName,
+        previewName: preview.previewName,
+        packageName: preview.packageName,
+        renders: preview.renders,
+        fallbackComponent: fallback ? fallback.name : null,
+        sourceFile: relativePath,
+      });
     }
   }
 
@@ -410,11 +454,13 @@ function countSkippedKotlinPreviews(components) {
 
 /**
  * Extract every @Preview @Composable function in a file, with a skip
- * classification. Returns [{ previewName, functionName, packageName, skip }]
- * where `skip` is null for capturable previews or a short reason otherwise.
- * (componentName and id are assigned later by matchPreviewToComponent.)
+ * classification. Returns
+ * [{ previewName, functionName, packageName, skip, renders }] where `skip` is
+ * null for capturable previews or a short reason otherwise, and `renders` is the
+ * set of known component names the preview body calls (empty unless
+ * `componentNames` is supplied).
  */
-function extractPreviewFunctionRecords(content, packageName) {
+function extractPreviewFunctionRecords(content, packageName, componentNames = null) {
   const results = [];
 
   // @Preview, then any number of further annotations (e.g. multipreview helpers),
@@ -427,14 +473,94 @@ function extractPreviewFunctionRecords(content, packageName) {
     const visibility = match[1]; // private, internal, or undefined
     const functionName = match[2];
     // The match ends on the opening '(' of the parameter list.
-    const params = extractBalancedParens(content, pattern.lastIndex - 1);
+    const openParen = pattern.lastIndex - 1;
+    const closeParen = matchDelimiter(content, openParen, "(", ")");
+    const params =
+      closeParen > openParen ? content.slice(openParen + 1, closeParen) : "";
     const previewName = derivePreviewName(match[0], functionName);
     const skip = classifyKotlinPreviewSkip(visibility, params);
 
-    results.push({ previewName, functionName, packageName, skip });
+    let renders = [];
+    if (componentNames && componentNames.size) {
+      const body = extractFunctionBody(content, closeParen);
+      renders = detectRenderedComponents(body, componentNames, functionName);
+    }
+
+    results.push({ previewName, functionName, packageName, skip, renders });
   }
 
   return results;
+}
+
+/**
+ * The set of known component names a preview body renders — i.e. the component
+ * names it calls (`Name(`). This is the evidence used to attribute a preview to
+ * one component or recognise it as a multi-component showcase. Comments and
+ * strings are stripped first so a name in a comment/string doesn't false-match.
+ */
+function detectRenderedComponents(body, componentNames, selfName) {
+  if (!body) return [];
+  const stripped = stripKotlinComments(body);
+  const found = [];
+  for (const name of componentNames) {
+    if (name === selfName) continue;
+    // Composable components are PascalCase; skip lowercase helper functions the
+    // scanner may have picked up (e.g. getSampleCardData).
+    if (!/^[A-Z]/.test(name)) continue;
+    if (new RegExp(`\\b${escapeRegExp(name)}\\s*\\(`).test(stripped)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
+
+/**
+ * Inner text of the `{ ... }` body that follows a function's parameter list.
+ * `closeParenIndex` is the index of the parameter list's closing ')'. Returns ""
+ * when no body brace is found.
+ */
+function extractFunctionBody(content, closeParenIndex) {
+  if (closeParenIndex < 0) return "";
+  const braceOpen = content.indexOf("{", closeParenIndex);
+  if (braceOpen === -1) return "";
+  const braceClose = matchDelimiter(content, braceOpen, "{", "}");
+  return braceClose === -1
+    ? content.slice(braceOpen + 1)
+    : content.slice(braceOpen + 1, braceClose);
+}
+
+/**
+ * Index of the delimiter matching the one at `openIndex` (e.g. the ')' closing an
+ * '('), honouring nesting and ignoring delimiters inside string literals. Returns
+ * -1 if unbalanced.
+ */
+function matchDelimiter(content, openIndex, open, close) {
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  for (let i = openIndex; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (ch === stringChar && content[i - 1] !== "\\") inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Escape a string for safe use inside a RegExp. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -518,35 +644,6 @@ function analyzeKotlinPreviews(components, projectPath) {
     }
   }
   return map;
-}
-
-/**
- * Return the inner text of a balanced parenthesised group starting at
- * `openIndex` (which must point at the opening '('), ignoring delimiters inside
- * string literals. Returns "" when no match is found.
- */
-function extractBalancedParens(content, openIndex) {
-  let depth = 0;
-  let inString = false;
-  let stringChar = "";
-  for (let i = openIndex; i < content.length; i++) {
-    const ch = content[i];
-    if (inString) {
-      if (ch === stringChar && content[i - 1] !== "\\") inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      inString = true;
-      stringChar = ch;
-      continue;
-    }
-    if (ch === "(") depth++;
-    else if (ch === ")") {
-      depth--;
-      if (depth === 0) return content.slice(openIndex + 1, i);
-    }
-  }
-  return "";
 }
 
 /**
@@ -1393,4 +1490,10 @@ function sanitize(id) {
   return String(id).replace(/[^a-zA-Z0-9]/g, "_").slice(0, 200);
 }
 
-module.exports = { captureAndroidScreenshots, analyzeKotlinPreviews };
+module.exports = {
+  captureAndroidScreenshots,
+  analyzeKotlinPreviews,
+  // Exported for unit tests.
+  extractPreviewFunctionRecords,
+  detectRenderedComponents,
+};

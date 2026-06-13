@@ -38,11 +38,19 @@ function renderHtml(catalogue) {
   const { platforms } = catalogue;
   const allComponents = [];
 
+  const allShowcases = [];
+
   for (const [platform, data] of Object.entries(platforms)) {
     for (const comp of data.components) {
       allComponents.push({ ...comp, platform });
     }
+    for (const showcase of data.showcases || []) {
+      allShowcases.push({ ...showcase, platform });
+    }
   }
+
+  // Lookup so a component card can render the showcases it appears in.
+  const showcaseById = new Map(allShowcases.map((s) => [s.id, s]));
 
   // Sort by usage count descending
   allComponents.sort((a, b) => b.usageCount - a.usageCount);
@@ -137,9 +145,18 @@ ${CSS}
     </section>
 
     <section class="components" id="components">
-      ${allComponents.map((c) => renderComponentCard(c)).join("\n      ")}
+      ${allComponents.map((c) => renderComponentCard(c, showcaseById)).join("\n      ")}
     </section>`,
     },
+    ...(allShowcases.length
+      ? [
+          {
+            id: "showcases",
+            label: `Showcases (${allShowcases.length})`,
+            content: renderShowcases(allShowcases),
+          },
+        ]
+      : []),
     ...(tokensSection
       ? [{ id: "tokens", label: "Style tokens", content: tokensSection }]
       : []),
@@ -443,6 +460,12 @@ function previewStatus(comp) {
     return { kind: "captured", allFallback };
   }
 
+  // No solo capture, but the component is rendered by one or more showcase
+  // previews — its image lives there, so this is not a failure.
+  if ((comp.appearsIn || []).length > 0) {
+    return { kind: "showcased" };
+  }
+
   const previewCount = (comp.previews || []).length;
   if (previewCount === 0) {
     return { kind: "none", label: "No #Preview in the source file." };
@@ -461,20 +484,44 @@ function previewStatus(comp) {
   };
 }
 
-function renderComponentCard(comp) {
+function renderComponentCard(comp, showcaseById = new Map()) {
   const screenList = [...new Set(comp.usages.map((u) => u.enclosingView))];
   const variantCount = comp.variants.length;
   const screenshots = comp.screenshots || [];
   const status = previewStatus(comp);
+  const showcases = (comp.appearsIn || [])
+    .map((id) => showcaseById.get(id))
+    .filter(Boolean);
 
   const statusBadge =
     status.kind === "none"
       ? `<span class="badge badge-no-preview">no preview</span>`
       : status.kind === "skipped"
         ? `<span class="badge badge-no-preview">preview skipped</span>`
-        : status.allFallback
-          ? `<span class="badge badge-fallback">full-screen</span>`
-          : "";
+        : status.kind === "showcased"
+          ? `<span class="badge badge-showcase">in showcase</span>`
+          : status.allFallback
+            ? `<span class="badge badge-fallback">full-screen</span>`
+            : "";
+
+  let previewSection;
+  if (screenshots.length > 0) {
+    previewSection = `<div class="card-section">
+          <h4>Preview${screenshots.length > 1 ? "s" : ""}</h4>
+          ${renderScreenshots(screenshots)}
+          ${showcases.length ? renderShowcaseBacklink(showcases) : ""}
+        </div>`;
+  } else if (showcases.length > 0) {
+    previewSection = `<div class="card-section">
+          <h4>Preview${showcases.length > 1 ? "s" : ""}</h4>
+          ${showcases.map((s) => renderShowcaseOnCard(s, comp.name)).join("\n          ")}
+        </div>`;
+  } else {
+    previewSection = `<div class="card-section">
+          <h4>Preview</h4>
+          <p class="preview-missing preview-missing-${status.kind}">${esc(status.label)}</p>
+        </div>`;
+  }
 
   return `<article class="component-card" data-name="${esc(comp.name)}" data-usages="${comp.usageCount}" data-variants="${variantCount}" data-platform="${comp.platform}" data-preview-status="${status.kind}">
       <div class="card-header">
@@ -487,17 +534,7 @@ function renderComponentCard(comp) {
         </div>
       </div>
       <div class="card-body">
-        ${
-          screenshots.length > 0
-            ? `<div class="card-section">
-          <h4>Preview${screenshots.length > 1 ? "s" : ""}</h4>
-          ${renderScreenshots(screenshots)}
-        </div>`
-            : `<div class="card-section">
-          <h4>Preview</h4>
-          <p class="preview-missing preview-missing-${status.kind}">${esc(status.label)}</p>
-        </div>`
-        }
+        ${previewSection}
         <div class="card-section">
           <h4>File</h4>
           <code>${esc(comp.relativePath)}</code>
@@ -521,6 +558,67 @@ function renderComponentCard(comp) {
         ${variantCount > 1 ? renderVariants(comp.variants) : ""}
       </div>
     </article>`;
+}
+
+/**
+ * Render a showcase preview inline on a component card: the captured image plus
+ * the other components it shows alongside this one.
+ */
+function renderShowcaseOnCard(showcase, selfName) {
+  const others = (showcase.renders || []).filter((r) => r !== selfName);
+  const withChips = others.length
+    ? `<div class="screen-list showcase-with">${others
+        .map((r) => `<span class="screen-tag">${esc(r)}</span>`)
+        .join(" ")}</div>`
+    : "";
+  return `<div class="showcase-on-card">
+            <p class="showcase-note">Shown in showcase <strong>${esc(showcase.name)}</strong>${others.length ? ` — with` : ""}</p>
+            ${withChips}
+            ${renderScreenshots(showcase.screenshots)}
+          </div>`;
+}
+
+/** A one-line backlink for a component that has its own preview but also appears in showcases. */
+function renderShowcaseBacklink(showcases) {
+  return `<p class="showcase-note">Also shown in: ${showcases
+    .map((s) => `<span class="showcase-link">${esc(s.name)}</span>`)
+    .join(", ")}</p>`;
+}
+
+/**
+ * The Showcases tab: one card per multi-component preview, with its image and a
+ * chip for every component it renders.
+ */
+function renderShowcases(showcases) {
+  const cards = showcases
+    .map(
+      (s) => `<article class="component-card showcase-card" data-name="${esc(s.name)}" data-platform="${esc(s.platform)}" id="showcase-${esc(s.id)}">
+      <div class="card-header">
+        <h3 class="card-title">${esc(s.name)}</h3>
+        <div class="card-meta">
+          <span class="badge badge-platform">${esc(s.platform)}</span>
+          <span class="badge badge-showcase">${(s.renders || []).length} components</span>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="card-section">
+          ${renderScreenshots(s.screenshots)}
+        </div>
+        <div class="card-section">
+          <h4>Components shown</h4>
+          <div class="screen-list">${(s.renders || [])
+            .map((r) => `<span class="screen-tag">${esc(r)}</span>`)
+            .join(" ")}</div>
+        </div>
+        <div class="card-section">
+          <h4>Source</h4>
+          <code>${esc(s.sourceFile)}</code>
+        </div>
+      </div>
+    </article>`,
+    )
+    .join("\n      ");
+  return `<section class="components" id="showcases">${cards}</section>`;
 }
 
 function renderParam(p) {
@@ -657,13 +755,22 @@ select {
 .badge-variants { background: #fef3c7; color: #92400e; }
 .badge-no-preview { background: #fee2e2; color: #991b1b; }
 .badge-fallback { background: #e0e7ff; color: #3730a3; }
+.badge-showcase { background: #dcfce7; color: #166534; }
 @media (prefers-color-scheme: dark) {
   .badge-variants { background: #422006; color: #fbbf24; }
   .badge-no-preview { background: #450a0a; color: #fca5a5; }
   .badge-fallback { background: #1e1b4b; color: #a5b4fc; }
+  .badge-showcase { background: #052e16; color: #4ade80; }
 }
 
 .preview-missing { font-size: 0.85rem; color: var(--text-secondary); font-style: italic; margin: 0; }
+.showcase-note { font-size: 0.8rem; color: var(--text-secondary); margin: 0 0 0.4rem; }
+.showcase-note strong { color: var(--text); }
+.showcase-on-card { margin-bottom: 0.75rem; }
+.showcase-on-card:last-child { margin-bottom: 0; }
+.showcase-with { margin-bottom: 0.4rem; }
+.showcase-link { font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 4px; background: #dcfce7; color: #166534; }
+@media (prefers-color-scheme: dark) { .showcase-link { background: #052e16; color: #4ade80; } }
 
 .card-body { padding: 0.75rem 1rem; }
 .card-section { margin-bottom: 0.75rem; }
