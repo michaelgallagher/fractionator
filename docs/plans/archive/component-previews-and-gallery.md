@@ -1,5 +1,14 @@
 # Plan: Component-only previews & a denser gallery
 
+> **Status: shipped.** Part 1 (component-only capture, both platforms), Part 2
+> (gallery grid, Gallery/List toggle, click-to-drill-in detail modal, container
+> width shared across views, sticky controls, platform grouping, and
+> default-collapsed detail in list mode), and the polish items (token
+> deep-linking, spacing-outlier flagging) all landed. The one item deliberately
+> *not* built is "thumbnail generation regardless" — `loading="lazy"` plus a
+> single representative thumbnail per gallery tile kept the page light without a
+> downscale step, so it wasn't needed. Kept here for the design rationale.
+
 Make the report easier to scan by (1) capturing previews as **just the
 component** at its intrinsic size instead of a full device screenshot, and
 (2) presenting components as a **dense gallery** rather than one long column of

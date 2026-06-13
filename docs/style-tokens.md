@@ -18,10 +18,15 @@ tab (and as data in the JSON / Markdown outputs).
   actual size as a type scale.
 
 - **Spacing** — the spacing/padding values in use, shown as a scale with a bar per
-  value and a usage count.
+  value and a usage count. Values that break the dominant rhythm (e.g. a one-off
+  `17` against a 4pt grid) are flagged **off-scale**, turning the scale from
+  descriptive into a drift check. The grid base is inferred per platform, and
+  nothing is flagged when there's no clear rhythm.
 
 Each token records the source locations where it appears, so the catalogue
-reflects real usage rather than the full design-system definition.
+reflects real usage rather than the full design-system definition. Every token is
+**clickable** — expand it to see the full list of `file:line` locations, grouped
+by file, rather than just a hover summary.
 
 ## Implementation
 

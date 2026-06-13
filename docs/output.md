@@ -9,7 +9,8 @@ A single self-contained page — no server needed.
 
 ### Tabs
 
-- **Components** — one card per component (below).
+- **Components** — every component, as a **Gallery** contact sheet or a **List**
+  of detailed cards (below).
 - **Showcases** — one card per multi-component preview, each with its image and a
   chip for every component it renders. See
   [screenshot-capture.md](screenshot-capture.md#multi-component-previews--showcases).
@@ -20,8 +21,22 @@ A single self-contained page — no server needed.
   [cross-platform-alignment.md](cross-platform-alignment.md).
 
 Above the cards are **summary stats** (component count, total usages, unused,
-single-use) and **filter/sort** controls (search by name; sort by usage count /
-name / variant count).
+single-use) and a **sticky control bar**: search by name, sort (usage count /
+name / variant count), and a **Gallery / List** toggle. The view choice is
+remembered (localStorage), and both views share the same page width so toggling
+never shifts the layout. When **≥2 platforms** are scanned, components are grouped
+under platform headings (iOS, Android) instead of interleaving; search and sort
+operate within each group.
+
+### Gallery vs. List
+
+- **Gallery** (default) — a responsive grid of compact tiles: one representative
+  thumbnail, name, platform, and usage count. The whole catalogue as a contact
+  sheet. **Click a tile** to open its full detail in a modal (Esc / backdrop /
+  × to close).
+- **List** — the full detailed cards in a single column. The preview stays
+  visible; the rest (file, signature, usages, variants) is tucked behind a
+  collapsed **Details** expander so the list stays scannable.
 
 ### Component cards
 

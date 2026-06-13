@@ -100,7 +100,7 @@ function renderHtml(catalogue) {
 ${CSS}
 </style>
 </head>
-<body>
+<body class="view-gallery">
 <div class="container">
   <header>
     <h1>Component catalogue</h1>
@@ -145,10 +145,14 @@ ${CSS}
           <option value="variants-desc">Most variants</option>
         </select>
       </label>
+      <div class="view-toggle" role="group" aria-label="View mode">
+        <button type="button" class="view-btn" data-view="gallery" aria-pressed="true">Gallery</button>
+        <button type="button" class="view-btn" data-view="list" aria-pressed="false">List</button>
+      </div>
     </section>
 
     <section class="components" id="components">
-      ${allComponents.map((c) => renderComponentCard(c, showcaseById)).join("\n      ")}
+      ${renderComponentsBody(allComponents, platformOrder, showcaseById)}
     </section>`,
     },
     ...(allShowcases.length
@@ -173,6 +177,14 @@ ${CSS}
         ]
       : []),
   ])}
+</div>
+
+<div id="detail-modal" class="detail-modal hidden" role="dialog" aria-modal="true" aria-label="Component detail">
+  <div class="detail-modal-backdrop"></div>
+  <div class="detail-modal-body">
+    <button type="button" class="detail-modal-close" aria-label="Close">&times;</button>
+    <div class="detail-modal-content"></div>
+  </div>
 </div>
 
 <script>
@@ -273,14 +285,17 @@ function renderColorTokens(colors) {
         c.aliases && c.aliases.length
           ? ` <span class="token-alias" title="${esc(c.aliases.join(", "))}">+${c.aliases.length}</span>`
           : "";
-      return `<div class="color-chip" title="${esc(locationSummary(c.locations))}">
+      return `<details class="token-detail color-chip-detail">
+        <summary class="color-chip" title="${esc(locationSummary(c.locations))}">
         ${swatch}
         <div class="color-meta">
           <span class="color-name">${esc(c.display)}${aliasNote}</span>
           <span class="color-hex">${esc(hexLabel)}</span>
         </div>
         <span class="token-count">${c.count}</span>
-      </div>`;
+        </summary>
+        ${renderTokenLocations(c.locations)}
+      </details>`;
     })
     .join("\n      ");
 
@@ -301,12 +316,15 @@ function renderTypeTokens(typography) {
         ? Math.max(11, Math.min(34, t.size))
         : 15;
       const sizeLabel = t.size != null ? `${t.size}` : "—";
-      return `<div class="type-row" title="${esc(locationSummary(t.locations))}">
+      return `<details class="token-detail">
+        <summary class="type-row" title="${esc(locationSummary(t.locations))}">
         <span class="type-size">${sizeLabel}</span>
         <span class="type-preview" style="font-size:${previewPx}px;font-weight:${t.weight === "bold" || t.weight === "semibold" ? 600 : 400}">${esc(t.display)}</span>
         <span class="type-kind">${t.kind}</span>
         <span class="token-count">${t.count}</span>
-      </div>`;
+        </summary>
+        ${renderTokenLocations(t.locations)}
+      </details>`;
     })
     .join("\n      ");
 
@@ -321,23 +339,50 @@ function renderTypeTokens(typography) {
 function renderSpacingTokens(spacing) {
   if (!spacing.length) return "";
   const maxValue = spacing.reduce((m, s) => Math.max(m, s.value), 0) || 1;
+  const scale = detectSpacingScale(spacing);
+  const offCount = spacing.filter((s) => scale.outliers.has(s.value)).length;
+  const scaleNote = scale.base
+    ? ` <span class="token-scale-note">${scale.base}${spacing[0].unit} grid${offCount ? ` · ${offCount} off-scale` : ""}</span>`
+    : "";
   const rows = spacing
     .map((s) => {
       const widthPct = Math.max(2, (s.value / maxValue) * 100);
-      return `<div class="space-row" title="${esc(s.contexts.join(", "))} · ${esc(locationSummary(s.locations))}">
+      const offScale = scale.outliers.has(s.value);
+      return `<details class="token-detail">
+        <summary class="space-row${offScale ? " off-scale" : ""}" title="${esc(s.contexts.join(", "))} · ${esc(locationSummary(s.locations))}">
         <span class="space-value">${s.value}<span class="space-unit">${esc(s.unit)}</span></span>
         <span class="space-bar-track"><span class="space-bar" style="width:${widthPct}%"></span></span>
+        ${offScale ? `<span class="badge badge-offscale" title="Not a multiple of ${scale.base}${esc(s.unit)}">off-scale</span>` : "<span></span>"}
         <span class="token-count">${s.count}</span>
-      </div>`;
+        </summary>
+        ${renderTokenLocations(s.locations)}
+      </details>`;
     })
     .join("\n      ");
 
   return `<div class="token-group">
-      <h3 class="token-group-title">Spacing scale <span class="token-group-count">${spacing.length}</span></h3>
+      <h3 class="token-group-title">Spacing scale <span class="token-group-count">${spacing.length}</span>${scaleNote}</h3>
       <div class="space-list">
       ${rows}
       </div>
     </div>`;
+}
+
+/**
+ * Infer the spacing rhythm and flag off-scale values. SwiftUI and Compose
+ * prototypes conventionally follow a 4pt grid; treat that as the scale only when
+ * most non-zero values actually follow it (otherwise the rhythm is unknown and
+ * we flag nothing). Returns { base: number|null, outliers: Set<number> }.
+ */
+function detectSpacingScale(spacing) {
+  const values = [
+    ...new Set(spacing.map((s) => s.value).filter((v) => v > 0)),
+  ];
+  if (values.length < 3) return { base: null, outliers: new Set() };
+  const base = 4;
+  const onScale = values.filter((v) => v % base === 0).length;
+  if (onScale / values.length < 0.6) return { base: null, outliers: new Set() };
+  return { base, outliers: new Set(values.filter((v) => v % base !== 0)) };
 }
 
 /** Short human summary of where a token appears, for hover tooltips. */
@@ -347,6 +392,27 @@ function locationSummary(locations) {
   const shown = files.slice(0, 3).join(", ");
   const more = files.length > 3 ? ` +${files.length - 3} more` : "";
   return `${files.length} file${files.length !== 1 ? "s" : ""}: ${shown}${more}`;
+}
+
+/** Expandable list of every file:line a token appears at, grouped by file. */
+function renderTokenLocations(locations) {
+  if (!locations || !locations.length) return "";
+  const byFile = new Map();
+  for (const l of locations) {
+    if (!byFile.has(l.relativePath)) byFile.set(l.relativePath, []);
+    byFile.get(l.relativePath).push(l.lineNumber);
+  }
+  const items = [...byFile.entries()]
+    .map(
+      ([file, lines]) =>
+        `<li class="loc-file"><code>${esc(file)}</code> <span class="loc-lines">${lines
+          .map((n) => `L${n}`)
+          .join(", ")}</span></li>`,
+    )
+    .join("\n        ");
+  return `<ul class="token-locations">
+        ${items}
+      </ul>`;
 }
 
 function renderAlignment(alignment, platformOrder) {
@@ -487,6 +553,33 @@ function previewStatus(comp) {
   };
 }
 
+/**
+ * Render the component cards. With a single platform, a flat list (unchanged).
+ * With two or more, group under platform headings so iOS/Android don't
+ * interleave. Cards stay direct children of #components (headings included) so
+ * the gallery grid and the sort/filter JS keep working; headings span the grid
+ * row and the sort runs within each group.
+ */
+function renderComponentsBody(allComponents, platformOrder, showcaseById) {
+  if (platformOrder.length < 2) {
+    return allComponents
+      .map((c) => renderComponentCard(c, showcaseById))
+      .join("\n      ");
+  }
+  return platformOrder
+    .map((p) => {
+      const group = allComponents.filter((c) => c.platform === p);
+      if (!group.length) return "";
+      const heading = `<h2 class="platform-heading" data-platform="${esc(p)}">${PLATFORM_LABELS[p] || esc(p)} <span class="platform-heading-count">${group.length}</span></h2>`;
+      const cards = group
+        .map((c) => renderComponentCard(c, showcaseById))
+        .join("\n      ");
+      return `${heading}\n      ${cards}`;
+    })
+    .filter(Boolean)
+    .join("\n      ");
+}
+
 function renderComponentCard(comp, showcaseById = new Map()) {
   const screenList = [...new Set(comp.usages.map((u) => u.enclosingView))];
   const variantCount = comp.variants.length;
@@ -509,18 +602,18 @@ function renderComponentCard(comp, showcaseById = new Map()) {
 
   let previewSection;
   if (screenshots.length > 0) {
-    previewSection = `<div class="card-section">
+    previewSection = `<div class="card-section card-section-preview">
           <h4>Preview${screenshots.length > 1 ? "s" : ""}</h4>
           ${renderScreenshots(screenshots)}
           ${showcases.length ? renderShowcaseBacklink(showcases) : ""}
         </div>`;
   } else if (showcases.length > 0) {
-    previewSection = `<div class="card-section">
+    previewSection = `<div class="card-section card-section-preview">
           <h4>Preview${showcases.length > 1 ? "s" : ""}</h4>
           ${showcases.map((s) => renderShowcaseOnCard(s, comp.name)).join("\n          ")}
         </div>`;
   } else {
-    previewSection = `<div class="card-section">
+    previewSection = `<div class="card-section card-section-preview">
           <h4>Preview</h4>
           <p class="preview-missing preview-missing-${status.kind}">${esc(status.label)}</p>
         </div>`;
@@ -538,6 +631,8 @@ function renderComponentCard(comp, showcaseById = new Map()) {
       </div>
       <div class="card-body">
         ${previewSection}
+        <details class="card-extra">
+        <summary class="card-extra-summary">Details</summary>
         <div class="card-section">
           <h4>File</h4>
           <code>${esc(comp.relativePath)}</code>
@@ -559,6 +654,7 @@ function renderComponentCard(comp, showcaseById = new Map()) {
             : `<div class="card-section"><p class="unused-note">Not used outside its definition file</p></div>`
         }
         ${variantCount > 1 ? renderVariants(comp.variants) : ""}
+        </details>
       </div>
     </article>`;
 }
@@ -711,7 +807,7 @@ const CSS = `
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.5; }
-.container { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem; }
+.container { max-width: 1400px; margin: 0 auto; padding: 2rem 1.5rem; }
 
 header { margin-bottom: 2rem; }
 h1 { font-size: 1.75rem; font-weight: 700; }
@@ -729,7 +825,12 @@ h1 { font-size: 1.75rem; font-weight: 700; }
 .stat-value { display: block; font-size: 1.5rem; font-weight: 700; color: var(--accent); }
 .stat-label { font-size: 0.8rem; color: var(--text-secondary); }
 
-.controls { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.controls {
+  display: flex; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 50;
+  padding: 0.75rem 0; background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
 #search {
   flex: 1; min-width: 200px; padding: 0.5rem 0.75rem; border: 1px solid var(--border);
   border-radius: 6px; font-size: 0.9rem; background: var(--surface); color: var(--text);
@@ -739,6 +840,15 @@ select {
   padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px;
   font-size: 0.9rem; background: var(--surface); color: var(--text);
 }
+
+.view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.view-btn {
+  background: var(--surface); border: none; cursor: pointer; font-family: var(--font);
+  font-size: 0.85rem; color: var(--text-secondary); padding: 0.5rem 0.85rem;
+}
+.view-btn + .view-btn { border-left: 1px solid var(--border); }
+.view-btn:hover { color: var(--text); }
+.view-btn[aria-pressed="true"] { background: var(--accent-light); color: var(--accent); font-weight: 600; }
 
 .component-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -814,6 +924,22 @@ select {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 999; cursor: pointer;
 }
 
+/* List view: secondary detail is collapsed by default behind a "Details"
+   expander, keeping the card scannable. The modal opens it for drill-in. */
+.card-extra { margin-top: 0.25rem; }
+.card-extra > .card-extra-summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-secondary); user-select: none;
+}
+.card-extra > .card-extra-summary::-webkit-details-marker { display: none; }
+.card-extra > .card-extra-summary::before {
+  content: '▶'; font-size: 0.55rem; transition: transform 0.15s; color: var(--text-secondary);
+}
+.card-extra[open] > .card-extra-summary::before { transform: rotate(90deg); }
+.card-extra[open] > .card-extra-summary { margin-bottom: 0.75rem; }
+.card-extra > .card-section:last-child { margin-bottom: 0; }
+
 .variants-expander { border: none; }
 .variants-expander > .variant-list { margin-top: 0.5rem; }
 .variants-summary {
@@ -838,6 +964,75 @@ select {
 .variant-count { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 
 .component-card.hidden { display: none; }
+
+/* Platform section headings (only rendered when 2+ platforms are present). */
+.platform-heading {
+  font-size: 1.05rem; font-weight: 700; margin: 1.75rem 0 0.75rem;
+  display: flex; align-items: baseline; gap: 0.5rem;
+  padding-bottom: 0.35rem; border-bottom: 1px solid var(--border);
+}
+.platform-heading:first-child { margin-top: 0; }
+.platform-heading-count { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); }
+.platform-heading.hidden { display: none; }
+
+/* --- Gallery view --- */
+/* Tile rules are scoped to #components so the detail modal (which clones a card
+   outside #components) renders the full, un-collapsed card. The container width
+   is shared with list view (see .container) so toggling never shifts the page. */
+body.view-gallery #components {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+body.view-gallery #components .platform-heading { grid-column: 1 / -1; margin: 0.5rem 0 0; }
+body.view-gallery #components .platform-heading:first-child { margin-top: 0; }
+body.view-gallery #components .component-card { margin-bottom: 0; cursor: pointer; }
+body.view-gallery #components .component-card:hover { border-color: var(--accent); }
+/* Compact tile: keep header + preview, drop the detail sections. */
+body.view-gallery #components .card-extra { display: none; }
+body.view-gallery #components .card-body > .card-section-preview { display: block; margin-bottom: 0; }
+body.view-gallery #components .card-section-preview h4 { display: none; }
+/* Lean badges: platform + usage only. */
+body.view-gallery #components .card-meta .badge-variants,
+body.view-gallery #components .card-meta .badge-no-preview,
+body.view-gallery #components .card-meta .badge-fallback,
+body.view-gallery #components .card-meta .badge-showcase { display: none; }
+/* One representative thumbnail per tile, so a component with many full-screen
+   fallback captures doesn't stack into a giant cell and break the grid. */
+body.view-gallery #components .card-section-preview .screenshot-figure:not(:first-child),
+body.view-gallery #components .card-section-preview .preview-group:not(:first-of-type),
+body.view-gallery #components .card-section-preview .showcase-on-card:not(:first-of-type) { display: none; }
+/* Letterbox thumbnails so a 126px glyph and a full-screen fallback both fit. */
+body.view-gallery #components .screenshot-strip { overflow: visible; }
+body.view-gallery #components .screenshot-img { max-height: 150px; }
+body.view-gallery #components .screenshot-figure figcaption,
+body.view-gallery #components .preview-group h5,
+body.view-gallery #components .showcase-note { display: none; }
+
+/* --- Detail modal (drill-in from a gallery tile) --- */
+body.modal-open { overflow: hidden; }
+.detail-modal { position: fixed; inset: 0; z-index: 200; }
+.detail-modal.hidden { display: none; }
+.detail-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); cursor: pointer; }
+.detail-modal-body {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(680px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+}
+.detail-modal-close {
+  position: absolute; top: 0.5rem; right: 0.5rem; z-index: 1; cursor: pointer;
+  width: 2rem; height: 2rem; border: none; border-radius: 6px; line-height: 1;
+  font-size: 1.4rem; background: var(--surface); color: var(--text-secondary);
+}
+.detail-modal-close:hover { color: var(--text); }
+.detail-modal-content .component-card { margin: 0; border: none; }
+/* Keep the header pills clear of the close button (top-right). */
+.detail-modal-content .card-header { padding-right: 3rem; }
+/* The modal shows full detail (JS opens the expander), so drop its summary. */
+.detail-modal-content .card-extra-summary { display: none; }
+.detail-modal-content .card-extra[open] > .card-extra-summary { margin-bottom: 0; }
 
 .tab-bar {
   display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem;
@@ -930,13 +1125,39 @@ select {
 /* Spacing scale */
 .space-list { display: flex; flex-direction: column; gap: 0.2rem; }
 .space-row {
-  display: grid; grid-template-columns: 3.5rem 1fr auto; align-items: center; gap: 0.75rem;
+  display: grid; grid-template-columns: 3.5rem 1fr auto auto; align-items: center; gap: 0.75rem;
   padding: 0.25rem 0.6rem;
 }
 .space-value { font-family: var(--mono); font-size: 0.8rem; text-align: right; }
 .space-unit { color: var(--text-secondary); font-size: 0.65rem; margin-left: 1px; }
 .space-bar-track { background: var(--badge-bg); border-radius: 999px; height: 0.55rem; }
 .space-bar { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.space-row.off-scale .space-bar { background: #d97706; }
+.badge-offscale { background: #fef3c7; color: #92400e; }
+@media (prefers-color-scheme: dark) {
+  .badge-offscale { background: #422006; color: #fbbf24; }
+  .space-row.off-scale .space-bar { background: #fbbf24; }
+}
+.token-scale-note { font-size: 0.7rem; font-weight: 500; color: var(--text-secondary); }
+
+/* Token deep-linking: each token is an expander revealing its usage locations. */
+.token-detail > summary { cursor: pointer; list-style: none; }
+.token-detail > summary::-webkit-details-marker { display: none; }
+.token-detail > summary::marker { content: ""; }
+.token-detail > summary:hover { border-color: var(--accent); }
+.type-list > .token-detail > summary.type-row:hover,
+.space-list > .token-detail > summary.space-row:hover { background: var(--accent-light); }
+.type-list > .token-detail:last-child > summary.type-row { border-bottom: none; }
+.color-chip-detail[open] { grid-column: 1 / -1; }
+.token-locations {
+  list-style: none; margin: 0.3rem 0 0.5rem; padding: 0.5rem 0.7rem;
+  background: var(--variant-bg); border: 1px solid var(--border); border-radius: 6px;
+  display: flex; flex-direction: column; gap: 0.25rem;
+  max-height: 240px; overflow-y: auto;
+}
+.loc-file { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; }
+.loc-file code { font-family: var(--mono); font-size: 0.72rem; color: var(--text); word-break: break-all; }
+.loc-lines { font-size: 0.7rem; color: var(--text-secondary); }
 `;
 
 // ---------------------------------------------------------------------------
@@ -953,6 +1174,21 @@ const JS = `
     return Array.from(container.querySelectorAll('.component-card'));
   }
 
+  function getHeadings() {
+    return Array.from(container.querySelectorAll('.platform-heading'));
+  }
+
+  // The cards that follow a heading, up to the next heading.
+  function cardsAfter(heading) {
+    const cards = [];
+    let n = heading.nextElementSibling;
+    while (n && !n.classList.contains('platform-heading')) {
+      if (n.classList.contains('component-card')) cards.push(n);
+      n = n.nextElementSibling;
+    }
+    return cards;
+  }
+
   function applyFilter() {
     const q = search.value.toLowerCase().trim();
     for (const card of getCards()) {
@@ -961,12 +1197,15 @@ const JS = `
       const match = !q || name.includes(q) || platform.includes(q);
       card.classList.toggle('hidden', !match);
     }
+    // Hide a platform heading once its whole group is filtered out.
+    for (const h of getHeadings()) {
+      const anyVisible = cardsAfter(h).some((c) => !c.classList.contains('hidden'));
+      h.classList.toggle('hidden', !anyVisible);
+    }
   }
 
-  function applySort() {
-    const cards = getCards();
-    const key = sort.value;
-    cards.sort((a, b) => {
+  function comparator(key) {
+    return (a, b) => {
       switch (key) {
         case 'usages-desc': return +b.dataset.usages - +a.dataset.usages;
         case 'usages-asc': return +a.dataset.usages - +b.dataset.usages;
@@ -975,12 +1214,83 @@ const JS = `
         case 'variants-desc': return +b.dataset.variants - +a.dataset.variants;
         default: return 0;
       }
-    });
-    for (const card of cards) container.appendChild(card);
+    };
+  }
+
+  function applySort() {
+    const cmp = comparator(sort.value);
+    const headings = getHeadings();
+    if (headings.length) {
+      // Grouped: sort within each platform section, keeping headings in place.
+      for (const h of headings) {
+        const cards = cardsAfter(h).sort(cmp);
+        let anchor = h;
+        for (const c of cards) { anchor.after(c); anchor = c; }
+      }
+    } else {
+      const cards = getCards().sort(cmp);
+      for (const card of cards) container.appendChild(card);
+    }
   }
 
   search.addEventListener('input', applyFilter);
   sort.addEventListener('change', applySort);
+
+  // Gallery / List view toggle (persisted)
+  const viewBtns = Array.from(document.querySelectorAll('.view-btn'));
+  function applyView(view) {
+    const v = view === 'list' ? 'list' : 'gallery';
+    document.body.classList.toggle('view-gallery', v === 'gallery');
+    document.body.classList.toggle('view-list', v === 'list');
+    for (const btn of viewBtns) {
+      btn.setAttribute('aria-pressed', String(btn.dataset.view === v));
+    }
+    try { localStorage.setItem('fractionator-view', v); } catch (e) {}
+  }
+  for (const btn of viewBtns) {
+    btn.addEventListener('click', function() { applyView(btn.dataset.view); });
+  }
+  let savedView = 'gallery';
+  try { savedView = localStorage.getItem('fractionator-view') || 'gallery'; } catch (e) {}
+  applyView(savedView);
+
+  // Detail modal: clicking a gallery tile opens its full card.
+  const modal = document.getElementById('detail-modal');
+  const modalContent = modal.querySelector('.detail-modal-content');
+  function openDetail(card) {
+    modalContent.innerHTML = '';
+    const clone = card.cloneNode(true);
+    clone.classList.remove('hidden');
+    // Drill-in shows everything: open the "Details" expander (and any nested ones).
+    clone.querySelectorAll('details').forEach((d) => { d.open = true; });
+    modalContent.appendChild(clone);
+    modal.classList.remove('hidden');
+    document.body.classList.add('modal-open');
+    modal.querySelector('.detail-modal-close').focus();
+  }
+  function closeDetail() {
+    if (modal.classList.contains('hidden')) return;
+    modal.classList.add('hidden');
+    document.body.classList.remove('modal-open');
+    modalContent.innerHTML = '';
+  }
+  container.addEventListener('click', function(e) {
+    if (!document.body.classList.contains('view-gallery')) return;
+    const card = e.target.closest('.component-card');
+    if (card) openDetail(card);
+  });
+  modal.querySelector('.detail-modal-backdrop').addEventListener('click', closeDetail);
+  modal.querySelector('.detail-modal-close').addEventListener('click', closeDetail);
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    const expanded = document.querySelector('.screenshot-img.expanded');
+    if (expanded) {
+      expanded.classList.remove('expanded');
+      document.querySelector('.screenshot-overlay')?.remove();
+      return;
+    }
+    closeDetail();
+  });
 
   // Tab switching
   document.querySelectorAll('.tab-btn').forEach(function(btn) {
@@ -1007,6 +1317,11 @@ const JS = `
       return;
     }
     if (e.target.classList.contains('screenshot-img')) {
+      // In gallery mode a tile thumbnail opens the detail modal (handled by the
+      // container click listener); don't also pop the lightbox.
+      if (document.body.classList.contains('view-gallery') && e.target.closest('#components')) {
+        return;
+      }
       if (e.target.classList.contains('expanded')) {
         e.target.classList.remove('expanded');
         document.querySelector('.screenshot-overlay')?.remove();
@@ -1129,4 +1444,4 @@ function renderTokenMarkdown(lines, tokens) {
   }
 }
 
-module.exports = { buildReport };
+module.exports = { buildReport, detectSpacingScale };
