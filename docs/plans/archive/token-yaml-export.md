@@ -19,7 +19,7 @@ But that data is:
 
 We want the tool, on every run, to also write YAML the website can drop in. A
 sample of the target colour shape lives in
-[`colour-token-sample.md`](colour-token-sample.md) — note that the sample is a
+[`colour-token-sample.md`](../colour-token-sample.md) — note that the sample is a
 full Eleventy *page* (front-matter **plus** a Nunjucks template body). We are
 deliberately **not** generating the template body; see Decisions.
 
