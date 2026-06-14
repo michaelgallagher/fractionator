@@ -8,21 +8,19 @@ and what it looks like.
 
 Point Fractionator at one or more prototypes and it will:
 
-- **Detect components** — `View` structs (SwiftUI) and `@Composable` functions
+- **Detect components:** `View` structs (SwiftUI) and `@Composable` functions
   (Compose).
-- **Count and locate usages** — every call site, with file, line, and enclosing
+- **Count and locate usages:** every call site, with file, line, and enclosing
   screen.
-- **Group parameter variants** — cluster call sites by arguments to see how many
+- **Group parameter variants:** cluster call sites by arguments to see how many
   distinct styles of each component exist.
-- **Capture previews** — render each `#Preview` / `@Preview` off-screen at the
-  component's intrinsic size and photograph it. Multi-component previews become
+- **Capture previews:** render each `#Preview` / `@Preview` off-screen at the
+  component's intrinsic size and create an image of it. Multi-component previews become
   **showcases**.
-- **Catalogue style tokens** — the colours (light *and* dark hex), type sizes, and
-  spacing units actually in use.
-- **Output a report** — a self-contained HTML page: a filterable component gallery
-  (with a Gallery/List toggle and click-to-drill-in detail), a Showcases tab, and a
-  Style tokens tab. Also JSON and Markdown. The HTML report is keyboard-accessible
-  and meets WCAG 2.2 AA — see [docs/a11y/](docs/a11y/A11Y.md).
+- **Catalogue style tokens:** the colours (light and dark hex), type sizes, and
+  spacing units.
+- **Output a report:** a self-contained HTML page with a filterable component gallery, a showcases tab, and a
+  style tokens tab. Also JSON and Markdown. 
 
 ## Requirements
 
@@ -64,18 +62,18 @@ See **[docs/usage.md](docs/usage.md)** for every flag.
 
 Full docs are in **[docs/](docs/README.md)**:
 
-- [Usage](docs/usage.md) — CLI reference, examples, display-trait variations
-- [Output](docs/output.md) — the HTML report, JSON, and Markdown
-- [Writing capturable previews](docs/writing-capturable-previews.md) — author
+- [Usage](docs/usage.md): CLI reference, examples, display-trait variations
+- [Output](docs/output.md): the HTML report, JSON, and Markdown
+- [Writing capturable previews](docs/writing-capturable-previews.md): author
   previews that render cleanly
-- [Component detection](docs/component-detection.md) — how components/usages/variants
+- [Component detection](docs/component-detection.md): how components/usages/variants
   are found
-- [Screenshot capture](docs/screenshot-capture.md) — the preview-rendering pipelines
-- [Style tokens](docs/style-tokens.md) — colours, type, spacing
-- [Cross-platform alignment](docs/cross-platform-alignment.md) — matching across
+- [Screenshot capture](docs/screenshot-capture.md): the preview-rendering pipelines
+- [Style tokens](docs/style-tokens.md): colours, type, spacing
+- [Cross-platform alignment](docs/cross-platform-alignment.md): matching across
   platforms
-- [Architecture](docs/architecture.md) — pipeline and module map
-- [Plans](docs/plans/README.md) — what's planned and what's shipped
+- [Architecture](docs/architecture.md): pipeline and module map
+- [Plans](docs/plans/README.md): what's planned and what's shipped
 
 ## Development
 
