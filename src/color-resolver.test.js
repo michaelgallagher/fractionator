@@ -4,6 +4,8 @@ const {
   colorsetToHex,
   parseComponent,
   schemeMode,
+  buildIosColorDefinitions,
+  buildAndroidColorDefinitions,
 } = require("./color-resolver");
 
 test("schemeMode pairs light and dark palette objects by base", () => {
@@ -79,4 +81,78 @@ test("colorsetToHex skips high-contrast variants", () => {
 
 test("colorsetToHex returns null when nothing resolvable", () => {
   assert.strictEqual(colorsetToHex({ colors: [] }), null);
+});
+
+test("buildIosColorDefinitions names tokens by alias and resolves via assets", () => {
+  const assets = new Map([
+    ["NHSBlue", { light: "#005EB8", dark: "#52A0FF" }],
+    ["NHSWarmYellow", { light: "#FFB81C" }],
+  ]);
+  const aliases = new Map([
+    ["nhsBlue", { assetName: "NHSBlue" }],
+    ["nhsWarmYellow", { assetName: "NHSWarmYellow" }],
+  ]);
+  assert.deepStrictEqual(buildIosColorDefinitions(assets, aliases), [
+    { token: "nhsBlue", light: "#005EB8", dark: "#52A0FF" },
+    { token: "nhsWarmYellow", light: "#FFB81C" }, // no dark key when absent
+  ]);
+});
+
+test("buildIosColorDefinitions resolves case-insensitively and includes literal-hex aliases", () => {
+  const assets = new Map([["NHSGreen", { light: "#007F3B", dark: "#00C55F" }]]);
+  const aliases = new Map([
+    ["nhsgreen", { assetName: "nhsgreen" }], // different case than the asset
+    ["nhsBrand", { hex: "#AB1234" }], // literal Color(red:green:blue:) alias
+  ]);
+  assert.deepStrictEqual(buildIosColorDefinitions(assets, aliases), [
+    { token: "nhsgreen", light: "#007F3B", dark: "#00C55F" },
+    { token: "nhsBrand", light: "#AB1234" },
+  ]);
+});
+
+test("buildIosColorDefinitions appends assets that have no alias", () => {
+  const assets = new Map([
+    ["NHSBlue", { light: "#005EB8" }],
+    ["NHSOrphan", { light: "#123456" }],
+  ]);
+  const aliases = new Map([["nhsBlue", { assetName: "NHSBlue" }]]);
+  assert.deepStrictEqual(buildIosColorDefinitions(assets, aliases), [
+    { token: "nhsBlue", light: "#005EB8" },
+    { token: "NHSOrphan", light: "#123456" },
+  ]);
+});
+
+test("buildAndroidColorDefinitions pairs props by scheme in source order", () => {
+  const schemes = new Map([
+    ["NHSColors|paleBlue", { light: "#CCDFF1", dark: "#002F5C" }],
+    ["NHSColors|blue", { light: "#005EB8", dark: "#3698FF" }],
+    ["NHSColors|warmYellow", { light: "#FFB81C" }],
+  ]);
+  assert.deepStrictEqual(buildAndroidColorDefinitions(schemes), [
+    { token: "paleBlue", light: "#CCDFF1", dark: "#002F5C" },
+    { token: "blue", light: "#005EB8", dark: "#3698FF" },
+    { token: "warmYellow", light: "#FFB81C" },
+  ]);
+});
+
+test("buildAndroidColorDefinitions excludes high-contrast schemes", () => {
+  const schemes = new Map([
+    ["NHSColors|blue", { light: "#005EB8", dark: "#3698FF" }],
+    ["NHSHighContrastColors|blue", { light: "#000000", dark: "#FFFFFF" }],
+  ]);
+  assert.deepStrictEqual(buildAndroidColorDefinitions(schemes), [
+    { token: "blue", light: "#005EB8", dark: "#3698FF" },
+  ]);
+});
+
+test("buildAndroidColorDefinitions appends colors.xml names not in the palette", () => {
+  const schemes = new Map([["NHSColors|blue", { light: "#005EB8" }]]);
+  const xmlColors = new Map([
+    ["blue", "#999999"], // already a palette prop — skipped
+    ["legacyTeal", "#00A5A5"],
+  ]);
+  assert.deepStrictEqual(buildAndroidColorDefinitions(schemes, xmlColors), [
+    { token: "blue", light: "#005EB8" },
+    { token: "legacyTeal", light: "#00A5A5" },
+  ]);
 });
