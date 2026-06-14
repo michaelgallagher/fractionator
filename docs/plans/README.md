@@ -9,6 +9,7 @@ to [`archive/`](archive/) once shipped, kept for the design rationale.
 |------|--------|---------|
 | [component-catalogue.md](component-catalogue.md) | Core shipped; web/Nunjucks pending | The master plan: scan native + web prototypes, detect components/usages/variants, capture previews, and output a cross-platform catalogue. SwiftUI and Compose are built; the Nunjucks/web path is not. |
 | [accessible-report.md](accessible-report.md) | In progress | Make the generated HTML report meet WCAG 2.2 AA (keyboard, focus, labels, APG tabs, motion, landmarks) and adopt [A11Y.md](https://github.com/fecarrico/A11Y.md) as the project's durable accessibility standard under `docs/a11y/`. |
+| [token-yaml-export.md](token-yaml-export.md) | Planned | Emit design tokens as clean YAML data files (colours/type sizes/spacing, per platform) into `tokens/` for the Eleventy + Nunjucks design-system site to consume. Full defined set, config-driven colour groups. |
 
 ## Done (archived)
 
