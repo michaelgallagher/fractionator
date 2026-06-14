@@ -6,6 +6,8 @@ const path = require("node:path");
 const yaml = require("js-yaml");
 const {
   buildColourGroups,
+  buildTypeSizes,
+  buildSpacing,
   dumpYaml,
   writeTokenFile,
 } = require("./token-emitter");
@@ -83,6 +85,38 @@ test("buildColourGroups skips spec tokens with no matching definition and omits 
   assert.deepStrictEqual(buildColourGroups(defs, spec), {
     groups: [
       { heading: "Core palette", colours: [{ token: "nhsBlue", light: "#005eb8" }] },
+    ],
+  });
+});
+
+test("buildTypeSizes names semantic roles and synthesises size tokens", () => {
+  const typography = [
+    { key: "caption2", kind: "semantic", size: 11, weight: null },
+    { key: "sp-16", kind: "explicit", size: 16, weight: null },
+    { key: "system-40-bold", kind: "explicit", size: 40, weight: "bold" },
+    { key: "displayLarge", kind: "semantic", size: null, weight: null },
+  ];
+  assert.deepStrictEqual(buildTypeSizes(typography), {
+    sizes: [
+      { token: "caption2", size: 11 },
+      { token: "size-16", size: 16 },
+      { token: "size-40-bold", size: 40, weight: "bold" },
+      { token: "displayLarge" }, // unresolved size → no size key
+    ],
+  });
+});
+
+test("buildSpacing synthesises spacing-N tokens with units", () => {
+  const spacing = [
+    { value: 4, unit: "dp" },
+    { value: 16, unit: "dp" },
+    { value: 7.5, unit: "pt" },
+  ];
+  assert.deepStrictEqual(buildSpacing(spacing), {
+    spacing: [
+      { token: "spacing-4", value: 4, unit: "dp" },
+      { token: "spacing-16", value: 16, unit: "dp" },
+      { token: "spacing-7.5", value: 7.5, unit: "pt" },
     ],
   });
 });

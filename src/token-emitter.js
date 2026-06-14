@@ -73,6 +73,54 @@ function lowerHex(hex) {
 }
 
 /**
+ * Build the `type-sizes.yaml` data shape from the token catalogue's typography
+ * entries (already resolved to point sizes and ordered as an ascending scale).
+ *
+ * Unlike colours, type sizes have no single design-system definition source, so
+ * this is the scale *as captured from usage* — semantic roles keep their name
+ * (`footnote`, `titleLarge`); explicit sizes get a synthesised `size-N` token.
+ *
+ * @param {{key:string, kind:string, size:?number, weight:?string}[]} typography
+ * @returns {{sizes: object[]}}
+ */
+function buildTypeSizes(typography = []) {
+  return {
+    sizes: typography.map((t) => {
+      const out = { token: typeToken(t) };
+      if (t.size != null) out.size = t.size;
+      if (t.weight) out.weight = t.weight;
+      return out;
+    }),
+  };
+}
+
+/** Name a type token: the semantic role where there is one, else `size-N(-weight)`. */
+function typeToken(t) {
+  if (t.kind === "semantic") return t.key;
+  const base = `size-${t.size}`;
+  return t.weight ? `${base}-${t.weight}` : base;
+}
+
+/**
+ * Build the `spacing.yaml` data shape from the token catalogue's spacing entries
+ * (ordered as an ascending scale). Spacing values have no source-side name, so
+ * each token is synthesised as `spacing-N`. Like type sizes, this is the scale
+ * captured from usage, not a full design-system definition.
+ *
+ * @param {{value:number, unit:string}[]} spacing
+ * @returns {{spacing: object[]}}
+ */
+function buildSpacing(spacing = []) {
+  return {
+    spacing: spacing.map((s) => ({
+      token: `spacing-${s.value}`,
+      value: s.value,
+      unit: s.unit,
+    })),
+  };
+}
+
+/**
  * Serialise a token data object to YAML, with a banner noting it's generated.
  * Double-quoted scalars match the sample's `"#005eb8"` style, and unbounded
  * line width keeps each entry on its own line.
@@ -108,6 +156,8 @@ function writeTokenFile(outputDir, platform, name, data) {
 
 module.exports = {
   buildColourGroups,
+  buildTypeSizes,
+  buildSpacing,
   dumpYaml,
   writeTokenFile,
 };
