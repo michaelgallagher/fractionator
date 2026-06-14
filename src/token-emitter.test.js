@@ -31,6 +31,62 @@ test("buildColourGroups yields an empty group for no definitions", () => {
   assert.deepStrictEqual(buildColourGroups([]), { groups: [{ colours: [] }] });
 });
 
+test("buildColourGroups places colours by spec, in spec order, with description", () => {
+  const defs = [
+    { token: "nhsBlue", light: "#005EB8", dark: "#52A0FF" },
+    { token: "nhsGreen", light: "#007F3B" },
+    { token: "nhsAccentColor", light: "#005EB8", dark: "#52A0FF" },
+  ];
+  const spec = [
+    {
+      heading: "Accent colour",
+      description: "The tint colour.",
+      tokens: ["nhsAccentColor"],
+    },
+    { heading: "Core palette", tokens: ["nhsGreen", "nhsBlue"] },
+  ];
+  assert.deepStrictEqual(buildColourGroups(defs, spec), {
+    groups: [
+      {
+        heading: "Accent colour",
+        description: "The tint colour.",
+        colours: [{ token: "nhsAccentColor", light: "#005eb8", dark: "#52a0ff" }],
+      },
+      {
+        heading: "Core palette",
+        colours: [
+          { token: "nhsGreen", light: "#007f3b" },
+          { token: "nhsBlue", light: "#005eb8", dark: "#52a0ff" },
+        ],
+      },
+    ],
+  });
+});
+
+test("buildColourGroups sweeps unplaced colours into a trailing Other group", () => {
+  const defs = [
+    { token: "nhsBlue", light: "#005EB8" },
+    { token: "nhsStray", light: "#123456" },
+  ];
+  const spec = [{ heading: "Core palette", tokens: ["nhsBlue"] }];
+  assert.deepStrictEqual(buildColourGroups(defs, spec), {
+    groups: [
+      { heading: "Core palette", colours: [{ token: "nhsBlue", light: "#005eb8" }] },
+      { heading: "Other", colours: [{ token: "nhsStray", light: "#123456" }] },
+    ],
+  });
+});
+
+test("buildColourGroups skips spec tokens with no matching definition and omits empty Other", () => {
+  const defs = [{ token: "nhsBlue", light: "#005EB8" }];
+  const spec = [{ heading: "Core palette", tokens: ["nhsBlue", "nhsGhost"] }];
+  assert.deepStrictEqual(buildColourGroups(defs, spec), {
+    groups: [
+      { heading: "Core palette", colours: [{ token: "nhsBlue", light: "#005eb8" }] },
+    ],
+  });
+});
+
 test("dumpYaml round-trips and quotes hex values", () => {
   const data = buildColourGroups([{ token: "nhsBlue", light: "#005EB8" }]);
   const text = dumpYaml(data, { platform: "ios", category: "colours" });

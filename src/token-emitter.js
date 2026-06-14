@@ -16,15 +16,48 @@ const yaml = require("js-yaml");
 
 /**
  * Build the `colours.yaml` data shape: a list of groups, each with an optional
- * heading/description and its colours. Without a grouping config every colour
- * lands in a single untitled group (grouping arrives in a later step), so the
- * output is always valid and complete.
+ * heading/description and its colours.
+ *
+ * With no grouping spec, every colour lands in a single untitled group, so the
+ * output is always valid and complete. With a spec (a list of
+ * `{heading, description?, tokens}` group defs, from the grouping config), each
+ * colour is placed by token name into its group, in the order the spec lists
+ * them; any defined colour the spec doesn't place falls into a trailing `Other`
+ * group so nothing is silently dropped and gaps in the config are visible.
  *
  * @param {{token:string, light?:string, dark?:string}[]} definitions
+ * @param {{heading:string, description?:string, tokens:string[]}[]} [spec]
  * @returns {{groups: {heading?:string, description?:string, colours:object[]}[]}}
  */
-function buildColourGroups(definitions) {
-  return { groups: [{ colours: definitions.map(toColour) }] };
+function buildColourGroups(definitions, spec) {
+  if (!spec || spec.length === 0) {
+    return { groups: [{ colours: definitions.map(toColour) }] };
+  }
+
+  const byToken = new Map(definitions.map((d) => [d.token, d]));
+  const assigned = new Set();
+  const groups = [];
+
+  for (const def of spec) {
+    const group = { heading: def.heading };
+    if (def.description) group.description = def.description;
+    group.colours = [];
+    for (const token of def.tokens || []) {
+      const colour = byToken.get(token);
+      if (!colour || assigned.has(token)) continue;
+      assigned.add(token);
+      group.colours.push(toColour(colour));
+    }
+    groups.push(group);
+  }
+
+  // Trailing catch-all for any defined colour the spec didn't place.
+  const leftover = definitions.filter((d) => !assigned.has(d.token));
+  if (leftover.length > 0) {
+    groups.push({ heading: "Other", colours: leftover.map(toColour) });
+  }
+
+  return { groups };
 }
 
 /** One colour entry: token name plus lower-cased light/dark hex (dark omitted when absent). */
