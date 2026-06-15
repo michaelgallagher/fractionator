@@ -9,6 +9,10 @@ to [`archive/`](archive/) once shipped, kept for the design rationale.
 |------|--------|---------|
 | [component-catalogue.md](component-catalogue.md) | Core shipped; web/Nunjucks pending | The master plan: scan native + web prototypes, detect components/usages/variants, capture previews, and output a cross-platform catalogue. SwiftUI and Compose are built; the Nunjucks/web path is not. |
 | [accessible-report.md](accessible-report.md) | In progress | Make the generated HTML report meet WCAG 2.2 AA (keyboard, focus, labels, APG tabs, motion, landmarks) and adopt [A11Y.md](https://github.com/fecarrico/A11Y.md) as the project's durable accessibility standard under `docs/a11y/`. |
+| [native-design-systems.md](native-design-systems.md) | Analysis / roadmap | Umbrella analysis: how Fractionator supports building the NHS iOS/Android design systems and publishing them to the web design system. The legibility principle, the forward-generate vs reverse-extract split, the concept join key as the bridge to web, and the sequence for the three plans below. |
+| [semantic-token-definitions.md](semantic-token-definitions.md) | Proposed | Give type and spacing a canonical definition source (like colours have) so they export as the full design-system set with semantic names instead of captured-from-usage with synthesised names. |
+| [component-data-export.md](component-data-export.md) | Proposed | Emit website-ready per-component data and publishable images — parallel to the token YAML export — so the Eleventy site can render native component pages without parsing the capture-oriented `catalogue.json`. |
+| [web-design-system-bridge.md](web-design-system-bridge.md) | Proposed | Make a shared concept the join key across web/iOS/android and diff native tokens against the web source of truth, so the three systems read as one design system documented three ways with drift made visible. |
 
 ## Done (archived)
 
