@@ -62,7 +62,67 @@ function buildIosColorResolver(projectPath) {
     return null; // semantic system colors are not resolved
   }
 
-  return { resolve };
+  return { resolve, definitions: buildIosColorDefinitions(assets, aliases) };
+}
+
+/**
+ * Enumerate the *full* iOS colour-token set for export — every defined token,
+ * whether or not the prototype references it. The canonical token names are the
+ * `extension Color` alias names (the API, e.g. `nhsBlue`); any asset without an
+ * alias is included under its own name so nothing defined is dropped.
+ *
+ * @param {Map<string,{light?:string,dark?:string}>} assets - asset name → value
+ * @param {Map<string,{assetName?:string,hex?:string}>} aliases - alias → target
+ * @returns {{token:string, light?:string, dark?:string}[]}
+ */
+function buildIosColorDefinitions(assets, aliases) {
+  const assetByLower = new Map();
+  for (const name of assets.keys()) assetByLower.set(name.toLowerCase(), name);
+  const realAssetName = (name) =>
+    assets.has(name) ? name : assetByLower.get(String(name).toLowerCase());
+
+  const defs = [];
+  const seen = new Set(); // token names already emitted
+  const coveredAssets = new Set(); // asset names reached via an alias
+
+  // Aliases first, in declaration order — these carry the real API names.
+  for (const [alias, target] of aliases) {
+    let value = null;
+    if (target.assetName) {
+      const real = realAssetName(target.assetName);
+      if (real) {
+        value = assets.get(real);
+        coveredAssets.add(real);
+      }
+    }
+    if (!value && target.hex) value = { light: target.hex };
+    const def = defValue(value);
+    if (!def || seen.has(alias)) continue;
+    seen.add(alias);
+    defs.push({ token: alias, ...def });
+  }
+
+  // Then any asset with no alias pointing at it, so the set stays complete.
+  const leftover = [...assets.keys()]
+    .filter((name) => !coveredAssets.has(name))
+    .sort((a, b) => a.localeCompare(b));
+  for (const name of leftover) {
+    const def = defValue(assets.get(name));
+    if (!def || seen.has(name)) continue;
+    seen.add(name);
+    defs.push({ token: name, ...def });
+  }
+
+  return defs;
+}
+
+/** Normalise a `{light?,dark?}` into an emit-ready value, or null if empty. */
+function defValue(value) {
+  if (!value) return null;
+  const out = {};
+  if (value.light) out.light = value.light;
+  if (value.dark) out.dark = value.dark;
+  return out.light || out.dark ? out : null;
 }
 
 /** Read every `*.colorset` into a Map<name, {light?, dark?}>. */
@@ -199,6 +259,7 @@ function buildAndroidColorResolver(projectPath) {
   const named = new Map(); // "Object.prop" and bare "prop" → hex
   // base scheme (e.g. "NHSColors") + prop → { light?, dark? }
   const schemes = new Map();
+  const xmlColors = new Map(); // colors.xml name → hex (light-only)
 
   const files = globSync("**/*.kt", {
     cwd: projectPath,
@@ -216,7 +277,7 @@ function buildAndroidColorResolver(projectPath) {
     indexKotlinColorDefs(src, named, schemes);
   }
 
-  readColorsXml(projectPath, named);
+  readColorsXml(projectPath, named, xmlColors);
 
   function resolve(key, kind, hit) {
     // Object-qualified brand reference (NHSLightColors.blue) — return the paired
@@ -236,7 +297,46 @@ function buildAndroidColorResolver(projectPath) {
     return byName ? { light: byName } : null;
   }
 
-  return { resolve };
+  return {
+    resolve,
+    definitions: buildAndroidColorDefinitions(schemes, xmlColors),
+  };
+}
+
+/**
+ * Enumerate the *full* Android colour-token set for export. The token names are
+ * the palette property names (`blue`, `paleBlue`), paired across the light/dark
+ * objects via `schemes`. High-contrast schemes are excluded so the export shows
+ * the default palette — mirroring how the iOS reader drops high-contrast
+ * appearances. `colors.xml` names that aren't palette props are appended as
+ * light-only tokens.
+ *
+ * @param {Map<string,{light?:string,dark?:string}>} schemes - "base|prop" → value
+ * @param {Map<string,string>} xmlColors - colors.xml name → hex
+ * @returns {{token:string, light?:string, dark?:string}[]}
+ */
+function buildAndroidColorDefinitions(schemes, xmlColors = new Map()) {
+  const defs = [];
+  const seen = new Set();
+
+  for (const [key, value] of schemes) {
+    const sep = key.indexOf("|");
+    const base = key.slice(0, sep);
+    const prop = key.slice(sep + 1);
+    if (/HighContrast/i.test(base)) continue;
+    const def = defValue(value);
+    if (!def || seen.has(prop)) continue;
+    seen.add(prop);
+    defs.push({ token: prop, ...def });
+  }
+
+  for (const [name, hex] of xmlColors) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    defs.push({ token: name, light: hex });
+  }
+
+  return defs;
 }
 
 /**
@@ -297,8 +397,12 @@ function indexKotlinColorDefs(src, named, schemes) {
   }
 }
 
-/** Read `<color name="x">#AARRGGBB</color>` entries from res/values/colors.xml. */
-function readColorsXml(projectPath, named) {
+/**
+ * Read `<color name="x">#AARRGGBB</color>` entries from res/values/colors.xml.
+ * Fills `named` (for resolution) and, when provided, `xmlColors` (the bare
+ * name → hex set used by the full-token export).
+ */
+function readColorsXml(projectPath, named, xmlColors) {
   const files = globSync("**/res/values*/colors.xml", {
     cwd: projectPath,
     absolute: true,
@@ -314,7 +418,9 @@ function readColorsXml(projectPath, named) {
     }
     let m;
     while ((m = entry.exec(src)) !== null) {
-      named.set(m[1], argbToHex(m[2]));
+      const hex = argbToHex(m[2]);
+      named.set(m[1], hex);
+      if (xmlColors) xmlColors.set(m[1], hex);
     }
   }
 }
@@ -337,6 +443,8 @@ const COMPOSE_CONSTANTS = {
 module.exports = {
   buildIosColorResolver,
   buildAndroidColorResolver,
+  buildIosColorDefinitions,
+  buildAndroidColorDefinitions,
   // exported for tests
   colorsetToHex,
   componentsToHex,

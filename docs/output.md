@@ -1,7 +1,7 @@
 # Output
 
 Fractionator writes to `catalogue-output/` (override with `--output`). Formats are
-chosen with `--format` (default `html,json`).
+chosen with `--format` (default `html,json,yaml`).
 
 ## HTML report (`index.html`)
 
@@ -72,3 +72,17 @@ for CI checks, dashboards, or feeding other tools.
 ## Markdown (`catalogue.md`)
 
 A summary table for pasting into documentation or design decision records.
+
+## Token YAML (`tokens/`)
+
+Clean, machine-consumable YAML for the design-system website — one file per token
+type, segmented by platform:
+
+```
+tokens/
+  ios/      colours.yaml  type-sizes.yaml  spacing.yaml
+  android/  colours.yaml  type-sizes.yaml  spacing.yaml
+```
+
+See [tokens-yaml.md](tokens-yaml.md) for the file shapes, the colour-grouping
+config (`--token-groups`), and how the scope differs by token type.

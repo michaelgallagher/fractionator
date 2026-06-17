@@ -18,6 +18,7 @@ to [`archive/`](archive/) once shipped, kept for the design rationale.
 
 | Plan | Shipped | Summary |
 |------|---------|---------|
+| [token-yaml-export.md](archive/token-yaml-export.md) | ✅ | Emit design tokens as clean YAML data files (colours/type sizes/spacing, per platform) into `tokens/` for the Eleventy + Nunjucks design-system site. Colours are the full defined set with a `--token-groups` config; type sizes/spacing are captured from usage. |
 | [component-previews-and-gallery.md](archive/component-previews-and-gallery.md) | ✅ | Component-only previews (Part 1) plus a dense gallery grid with a Gallery/List toggle, click-to-drill-in detail modal, platform grouping, and collapsed list detail (Part 2); token deep-linking and spacing-outlier flagging. |
 | [style-tokens-tab.md](archive/style-tokens-tab.md) | ✅ | Capture and display design tokens — colours, type sizes, spacing — as a Style tokens tab, plus JSON/Markdown. |
 | [missing-and-blank-previews.md](archive/missing-and-blank-previews.md) | ✅ | Why some components produced no image (or a blank one), and the fixes: blank-render detection + fallback (F1), `@Previewable @State` support (F3), and surfacing preview gaps in the report (F5). Both platforms. |
