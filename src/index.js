@@ -36,6 +36,13 @@ const {
 } = require("./color-resolver");
 const { buildAndroidTypeResolver } = require("./type-resolver");
 const { buildTokenCatalogue } = require("./token-catalogue");
+const {
+  buildColourGroups,
+  buildTypeSizes,
+  buildSpacing,
+  writeTokenFile,
+} = require("./token-emitter");
+const { loadTokenGroups, groupsFor } = require("./token-groups-loader");
 
 /**
  * Main entry point. Scans the provided prototype sources, builds the
@@ -48,6 +55,11 @@ async function generate(options) {
   console.log("🧬 Fractionator\n");
 
   const catalogue = { platforms: {}, tokens: {} };
+
+  // Full colour-token definitions per platform (every defined token, not just
+  // those used) for the YAML export. Sourced from the resolvers, unlike the
+  // usage-shaped catalogue.
+  const colorDefinitions = {};
 
   // Unfiltered component lists per platform, for cross-platform matching.
   // (Unused components still matter for alignment, so this is collected from
@@ -201,9 +213,11 @@ async function generate(options) {
       sources.ios,
       iosTokenSpec(stripSwiftComments),
     );
+    const iosColorResolver = buildIosColorResolver(sources.ios);
+    colorDefinitions.ios = iosColorResolver.definitions;
     catalogue.tokens.ios = buildTokenCatalogue(
       iosTokenOccurrences,
-      buildIosColorResolver(sources.ios),
+      iosColorResolver,
     );
     logTokenSummary(catalogue.tokens.ios);
 
@@ -381,9 +395,11 @@ async function generate(options) {
       sources.android,
       androidTokenSpec(stripKotlinComments),
     );
+    const androidColorResolver = buildAndroidColorResolver(sources.android);
+    colorDefinitions.android = androidColorResolver.definitions;
     catalogue.tokens.android = buildTokenCatalogue(
       androidTokenOccurrences,
-      buildAndroidColorResolver(sources.android),
+      androidColorResolver,
       buildAndroidTypeResolver(sources.android),
     );
     logTokenSummary(catalogue.tokens.android);
@@ -437,6 +453,17 @@ async function generate(options) {
   // --- Build output ---
   console.log(`\nWriting output to ${outputDir}`);
   buildReport(catalogue, outputDir, formats);
+
+  // Token YAML export — clean per-platform, per-type data files for the design
+  // system website. A separate concern from the report (different inputs), so
+  // it's emitted here rather than threaded through buildReport.
+  if (formats.includes("yaml")) {
+    const groupsConfig = options.tokenGroupsPath
+      ? loadTokenGroups(options.tokenGroupsPath)
+      : null;
+    emitTokenYaml(catalogue, colorDefinitions, outputDir, groupsConfig);
+  }
+
   console.log("\n🎨 Done.");
 
   // Open the HTML report in the default browser, unless suppressed.
@@ -472,6 +499,31 @@ function openInBrowser(filePath) {
   } catch (err) {
     console.warn(`   Could not open browser: ${err.message}`);
     console.warn(`   Open it manually: ${filePath}`);
+  }
+}
+
+/**
+ * Write the token YAML export: one file per token type (colours, type sizes,
+ * spacing), under `tokens/<platform>/`, for every scanned platform. Colours come
+ * from the full definition set; type sizes and spacing from the usage catalogue.
+ */
+function emitTokenYaml(catalogue, colorDefinitions, outputDir, groupsConfig) {
+  for (const platform of Object.keys(catalogue.tokens)) {
+    const tokens = catalogue.tokens[platform];
+    const definitions = colorDefinitions[platform] || [];
+
+    const colours = buildColourGroups(
+      definitions,
+      groupsFor(groupsConfig, platform, "colours"),
+    );
+    writeTokenFile(outputDir, platform, "colours", colours);
+    writeTokenFile(outputDir, platform, "type-sizes", buildTypeSizes(tokens.typography));
+    writeTokenFile(outputDir, platform, "spacing", buildSpacing(tokens.spacing));
+
+    const colourCount = colours.groups.reduce((n, g) => n + g.colours.length, 0);
+    console.log(
+      `   Tokens (${platform}): ${colourCount} colours, ${tokens.typography.length} type sizes, ${tokens.spacing.length} spacing → ${path.join("tokens", platform)}/`,
+    );
   }
 }
 

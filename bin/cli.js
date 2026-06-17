@@ -23,10 +23,14 @@ program
   .option("--output <dir>", "Output directory", "catalogue-output")
   .option(
     "--format <formats>",
-    "Output formats, comma-separated (html,json,md)",
-    "html,json",
+    "Output formats, comma-separated (html,json,md,yaml)",
+    "html,json,yaml",
   )
   .option("--mapping <path>", "Path to component-mapping.yaml")
+  .option(
+    "--token-groups <path>",
+    "Path to a token-groups.yaml that groups colour tokens into named sections",
+  )
   .option(
     "--components-dir <glob>",
     "Override component directory pattern (glob)",
@@ -85,6 +89,7 @@ program
       outputDir,
       formats,
       mappingPath: opts.mapping ? path.resolve(opts.mapping) : null,
+      tokenGroupsPath: opts.tokenGroups ? path.resolve(opts.tokenGroups) : null,
       componentsDirOverride: opts.componentsDir || null,
       includeUnused: opts.includeUnused || false,
       initMapping: opts.initMapping || false,
